@@ -13,6 +13,10 @@
     "typecheck": "tsc --noEmit",
     "test:startup-motion": "bun test src/renderer/pocket/startup-motion.test.ts",
     "build": "vite build",
+    "build:webui": "vite build --config webui/vite.config.ts",
+    "dev:webui": "vite --config webui/vite.config.ts",
+    "typecheck:webui": "tsc --noEmit -p webui/tsconfig.json",
+    "test:webui": "bun test webui/",
     "apk": "bun run build && node pocket-app/scripts/build-apk.mjs"
   },
   "dependencies": {
