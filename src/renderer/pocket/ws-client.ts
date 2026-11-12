@@ -999,6 +999,37 @@ export class WsClient {
   readFileAsDataUrl(filePath: string, access?: { sessionId?: string; candidateBasePaths?: string[] }): Promise<unknown> {
     return this.sendCommand({ type: 'read_file_as_data_url', filePath, access })
   }
+
+  // ---- Goal 长时自主执行 ----
+  // 与主进程 AGENT_IPC_CHANNELS.START_GOAL / PAUSE_GOAL 等一一对应，
+  // 服务端把这些命令转发给唯一的 GoalSessionService，本客户端不持有状态机。
+  getGoal(sessionId: string): Promise<unknown> {
+    return this.sendCommand({ type: 'get_goal', sessionId })
+  }
+
+  getGoalHistory(sessionId: string): Promise<unknown> {
+    return this.sendCommand({ type: 'get_goal_history', sessionId })
+  }
+
+  startGoal(input: { sessionId: string; goal: string }): Promise<unknown> {
+    return this.sendCommand({ type: 'start_goal', ...input })
+  }
+
+  pauseGoal(sessionId: string): Promise<unknown> {
+    return this.sendCommand({ type: 'pause_goal', sessionId })
+  }
+
+  resumeGoal(sessionId: string): Promise<unknown> {
+    return this.sendCommand({ type: 'resume_goal', sessionId })
+  }
+
+  stopGoal(sessionId: string): Promise<unknown> {
+    return this.sendCommand({ type: 'stop_goal', sessionId })
+  }
+
+  clearGoal(sessionId: string): Promise<unknown> {
+    return this.sendCommand({ type: 'clear_goal', sessionId })
+  }
 }
 
 /** 派生默认 WS 地址（与当前 HTTP 页面同源，补 /ws） */
