@@ -13,6 +13,7 @@ export interface DiagMessageSummary {
   t: string
   u: string
   p: boolean
+  r: boolean
   b: string[]
 }
 
@@ -28,6 +29,7 @@ export interface DiagLastTurn {
 
 export interface DiagData {
   build: string
+  reconnects: number
   connected: boolean
   running: boolean
   sessionActive: boolean

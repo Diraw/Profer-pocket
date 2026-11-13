@@ -237,6 +237,8 @@ function App(): React.ReactElement {
   const runningRef = React.useRef(running)
   runningRef.current = running
   const messagesRef = React.useRef<SDKMessage[]>([])
+  /** WS 重连次数（含首次连接）：诊断「电脑复现 iPhone 不复现」用。 */
+  const reconnectCountRef = React.useRef(0)
   const [input, setInput] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [acting, setActing] = React.useState(false)
@@ -359,6 +361,7 @@ function App(): React.ReactElement {
         t: String(message.type ?? ''),
         u: String((message as { uuid?: string }).uuid ?? '').slice(0, 8),
         p: (message as { _partial?: boolean })._partial === true,
+        r: (message as { isReplay?: boolean }).isReplay === true,
         b: blocks,
       }
     }
@@ -366,12 +369,13 @@ function App(): React.ReactElement {
     const lastTimeline = lastNonSystem.index >= 0 ? timelines[lastNonSystem.index] : undefined
     return {
       build: __WEBUI_BUILD__,
+      reconnects: reconnectCountRef.current,
       connected,
       running,
       sessionActive,
       lastTurnFinished,
       lastNonSystem: { index: lastNonSystem.index, pending: lastNonSystem.pending },
-      messages: messages.slice(-8).map(summary),
+      messages: messages.slice(-14).map(summary),
       lastTurn: lastGroup?.type === 'assistant-turn' && lastTimeline
         ? {
           headlineLen: lastTimeline.headline.length,
@@ -386,7 +390,7 @@ function App(): React.ReactElement {
         }
         : null,
     }
-  }, [messages, groups, timelines, lastNonSystem, running, sessionActive, lastTurnFinished, connected])
+  }, [messages, groups, timelines, lastNonSystem, running, sessionActive, lastTurnFinished, connected, reconnectCountRef])
   /** 内核决定用哪套推理档位；缺省按 claude 处理（历史会话与旧服务端都是这个默认） */
   const agentRuntime = meta?.agentRuntime ?? 'claude'
   /** 当前内核可切的模型（过滤规则与服务端 update_session_model 同一份） */
@@ -768,6 +772,10 @@ function App(): React.ReactElement {
         if (state === 'open') {
           setConnection('已连接')
           setConnected(true)
+          // 重连计数：桌面浏览器冻结后台标签页、回来时 WS 重连 + 事件重放，
+          // 重放路径与实时流的帧标记不同（isReplay），是「电脑复现 iPhone 不复现」
+          // 的重点嫌疑。诊断浮层会显示它。
+          reconnectCountRef.current += 1
           markReady()
         }
         else if (state === 'unauthorized') { setConnection('凭据无效'); setConnected(false) }
