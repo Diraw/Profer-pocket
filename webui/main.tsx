@@ -238,7 +238,7 @@ function App(): React.ReactElement {
   /** 给 WS 回调用的实时镜像：回调闭包在 effect 创建时定格，必须用 ref 拿最新值。 */
   const runningRef = React.useRef(running)
   runningRef.current = running
-  const groupsRef = React.useRef<MessageGroup[]>([])
+  const messagesRef = React.useRef<SDKMessage[]>([])
   const [input, setInput] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [acting, setActing] = React.useState(false)
@@ -286,7 +286,7 @@ function App(): React.ReactElement {
 
   // session-core 的纯函数负责快照去重与 turn 分组，避免自己重抄一套口径。
   const groups = React.useMemo(() => groupIntoTurns(messages), [messages])
-  groupsRef.current = groups
+  messagesRef.current = messages
   const turns = React.useMemo(() => toTranscript(groups), [groups])
   const extras = React.useMemo(() => groups.map(extractTurnExtras), [groups])
   /**
@@ -482,7 +482,7 @@ function App(): React.ReactElement {
     node.style.height = `${Math.min(node.scrollHeight, 168)}px`
   }, [input])
 
-  const reload = React.useCallback(async (client: WsClient): Promise<void> => {
+  const reload = React.useCallback(async (client: WsClient): Promise<SDKMessage[]> => {
     try {
       // 只取尾部：多留 TAIL_HEADROOM 条余量，跑完一轮新消息落进来时窗口不会立刻往前滑动。
       const page = decodeMessagePage(
@@ -492,10 +492,28 @@ function App(): React.ReactElement {
       setPageStart(page.startIndex)
       setHasOlder(page.hasMore)
       setNotice((previous) => previous.startsWith('读取会话失败') ? '' : previous)
+      return page.messages
     } catch (error) {
       setNotice(`读取会话失败：${error instanceof Error ? error.message : String(error)}`)
+      return []
     }
   }, [sessionId])
+
+  /**
+   * 按权威消息列表校准 running：最后一轮若已收尾（末尾工具不再在飞），就不该再当作运行中。
+   * 手机切后台超过事件日志窗口（10 分钟）后回来，重连走 requiresSnapshot 快照路径，
+   * 漏掉的 result / run_completed 不会补发 —— 不在这里兜底，过程组就永远不收起。
+   */
+  const calibrateRunning = React.useCallback((messages: SDKMessage[]): void => {
+    if (!runningRef.current) return
+    const grouped = groupIntoTurns(messages)
+    let last: MessageGroup | undefined
+    for (let i = grouped.length - 1; i >= 0; i--) {
+      const candidate = grouped[i]
+      if (candidate && candidate.type !== 'system') { last = candidate; break }
+    }
+    if (last?.type === 'assistant-turn' && !turnHasTrailingPendingTool(last)) setRunning(false)
+  }, [])
 
   /** 快照拉取：页面晚连 / 断线重连时补回已经存在的待处理交互。 */
   const loadInteractions = React.useCallback(async (client: WsClient): Promise<void> => {
@@ -709,19 +727,20 @@ function App(): React.ReactElement {
         else if (state === 'unauthorized') { setConnection('凭据无效'); setConnected(false) }
         else { setConnection(state === 'connecting' ? '连接中…' : `连接断开${info ? ` · ${info}` : ''}`); setConnected(false) }
       },
-      // 重放追平后，按权威消息状态校准 running：手机切后台/锁屏会掐掉 WS，重连重放尾流可能把
-      // running 顶回 true 却没配对 run_completed（重放窗口已越过它）。只要最后一轮末尾工具已收齐、
-      // 说明早已跑完，就把 running 归零 —— 否则过程组不收起、运行指示常亮。只在「重连追平」时校准，
-      // 不会误伤正在进行的轮次（那时候末尾工具还在飞，这里不会动它）。
+      // 重连恢复后的状态收敛。服务端事件日志只保留最近 10 分钟（maxAgeMs），
+      // 手机锁屏/切后台超过这个时长再回来，游标必然落在窗口外 → requiresSnapshot=true、
+      // complete=false，服务端一个事件都不补发。漏掉的窗口里可能有 result 与 run_completed，
+      // 不重拉权威尾部就会永远停在「running=true、最后一轮没 result」——
+      // 表现为最后一轮过程组不收起、正文被收回过程组，直到发新消息才复位。
+      // 所以两种情况都要收敛：requiresSnapshot 时必然漏事件，重拉 + 校准；
+      // complete 时重放会自愈（漏掉的 run_completed 一定在游标之后、一定被补发），
+      // 但重放里的 assistant 消息可能先把 running 顶回 true，顺手校准一次不亏。
       onAgentResumeStatus: (status) => {
-        if (!status.complete || !runningRef.current) return
-        const list = groupsRef.current
-        let last: MessageGroup | undefined
-        for (let i = list.length - 1; i >= 0; i--) {
-          const candidate = list[i]
-          if (candidate && candidate.type !== 'system') { last = candidate; break }
+        if (status.requiresSnapshot) {
+          void reload(client).then(calibrateRunning)
+          return
         }
-        if (last?.type === 'assistant-turn' && !turnHasTrailingPendingTool(last)) setRunning(false)
+        calibrateRunning(messagesRef.current)
       },
       onAgentEvent: (event) => {
         if (event.sessionId !== sessionId) return
@@ -825,9 +844,15 @@ function App(): React.ReactElement {
      * 手机上切到后台/锁屏后，系统会掐掉 WS，而重连定时器在后台被冻结 ——
      * 回到页面时可能一直停在「连接断开」。恢复前台或网络恢复时立刻补一次重连
      * （reconnectNow 对已连上的连接是 no-op，不会打断会话）。
+     *
+     * 重连之外还要重拉一次权威消息尾部：后台期间跑完的一轮，其 result / run_completed
+     * 可能落在事件日志窗口（仅 10 分钟）之外，重连补发不回来 —— 不重拉的话，
+     * 过程组永远不收起、正文被收回过程组，直到发新消息才复位。
      */
     const wake = (): void => {
-      if (document.visibilityState === 'visible') client.reconnectNow()
+      if (document.visibilityState !== 'visible') return
+      client.reconnectNow()
+      void reload(client).then(calibrateRunning)
     }
     document.addEventListener('visibilitychange', wake)
     window.addEventListener('online', wake)
@@ -861,7 +886,7 @@ function App(): React.ReactElement {
       client.disconnect()
       clientRef.current = null
     }
-  }, [sessionId, token, reload, loadInteractions, loadGoal, loadGoalHistory, loadVisualizations, loadSessionMeta, loadPresets])
+  }, [sessionId, token, reload, calibrateRunning, loadInteractions, loadGoal, loadGoalHistory, loadVisualizations, loadSessionMeta, loadPresets])
 
   const respondPermission = React.useCallback(async (
     requestId: string,
