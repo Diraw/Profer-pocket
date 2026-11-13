@@ -68,6 +68,24 @@ const QUICK_PROMPTS = ['总结一下当前进度', '接下来该做什么', '解
 const PREFER_SEND_BUTTON = typeof window.matchMedia === 'function'
   && window.matchMedia('(pointer: coarse)').matches
 
+/**
+ * 三态权限模式，与桌面端那个下拉是同一套东西（auto=自动审批 / bypassPermissions=完全自动 / plan=计划模式）。
+ *
+ * 早期版本这里是个「自动批准」开关，只替这个网页点允许、不改会话模式 ——
+ * 结果两端各有一个长得像同一个意思的开关，实际互不相干：桌面仍按原模式弹卡。
+ * 现在统一成一份真实状态，改这里就等于改会话。
+ */
+const PERMISSION_MODES: ReadonlyArray<{
+  mode: SendPermissionMode
+  short: string
+  label: string
+  hint: string
+}> = [
+  { mode: 'auto', short: '确认', label: '自动审批', hint: '安全操作自动放行，危险操作仍需你确认' },
+  { mode: 'bypassPermissions', short: '自动', label: '完全自动', hint: '全部工具直接执行，不再逐项确认' },
+  { mode: 'plan', short: '计划', label: '计划模式', hint: '只出方案不动手，你批准后才执行' },
+]
+
 const boot = window.__PROFER_WEBUI_BOOT__
 const query = new URLSearchParams(window.location.search)
 const pathMatch = window.location.pathname.match(/^\/s\/([^/]+)/)
@@ -122,9 +140,9 @@ function App(): React.ReactElement {
   const [exitPlans, setExitPlans] = React.useState<ExitPlanItem[]>([])
   const [goalProposals, setGoalProposals] = React.useState<GoalProposalItem[]>([])
   const [goal, setGoal] = React.useState<GoalState | null>(null)
-  const [autoApprove, setAutoApprove] = React.useState(() => localStorage.getItem('profer-webui-auto-approve') === '1')
+  const [modeMenuOpen, setModeMenuOpen] = React.useState(false)
+  const [switchingMode, setSwitchingMode] = React.useState(false)
   const clientRef = React.useRef<WsClient | null>(null)
-  const autoApprovedRef = React.useRef<Set<string>>(new Set())
   const scrollRef = React.useRef<HTMLDivElement | null>(null)
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null)
   const lastCompletedRef = React.useRef(0)
@@ -146,6 +164,18 @@ function App(): React.ReactElement {
   const hasPending = permissions.length + askUsers.length + exitPlans.length > 0
   /** 提议不阻塞运行，所以只影响「是否渲染卡片区」，不锁输入框。 */
   const hasCards = hasPending || goalProposals.length > 0
+  const permissionMode = meta?.permissionMode ?? 'bypassPermissions'
+  const currentMode = PERMISSION_MODES.find((entry) => entry.mode === permissionMode) ?? PERMISSION_MODES[1]!
+
+  // 菜单开着时能用 Esc 关掉，否则手机返回键/键盘都会觉得被卡住
+  React.useEffect(() => {
+    if (!modeMenuOpen) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setModeMenuOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [modeMenuOpen])
 
   // 让 reload 读到「当前持有条数」，同时避免把它塞进回调依赖 —— 否则每条消息都会重建连接 effect。
   React.useEffect(() => { heldRef.current = messages.length }, [messages])
@@ -534,23 +564,28 @@ function App(): React.ReactElement {
     onGoalProposal: (id, accepted) => { void respondGoalProposal(id, accepted) },
   }), [respondPermission, respondAskUser, respondExitPlan, respondGoalProposal])
 
-  // 网页端「自动批准」兜底：收到权限请求即代为允许并记住本会话，不改动桌面端的会话设置。
-  React.useEffect(() => {
-    if (!autoApprove || !connected || acting) return
-    const first = permissions[0]
-    if (!first || autoApprovedRef.current.has(first.requestId)) return
-    autoApprovedRef.current.add(first.requestId)
-    void respondPermission(first.requestId, 'allow', true)
-  }, [autoApprove, connected, acting, permissions, respondPermission])
-
-  const toggleAutoApprove = (): void => {
-    setAutoApprove((previous) => {
-      const next = !previous
-      localStorage.setItem('profer-webui-auto-approve', next ? '1' : '0')
-      if (!next) autoApprovedRef.current.clear()
-      return next
-    })
-  }
+  /**
+   * 切换会话的权限模式。
+   *
+   * 这里必须走服务端命令，而不是在页面里「代用户点允许」：
+   * 后者只影响这个网页，电脑端仍按原模式弹卡，两边状态会越走越远。
+   */
+  const switchPermissionMode = React.useCallback(async (mode: SendPermissionMode): Promise<void> => {
+    const client = clientRef.current
+    if (!client || switchingMode) return
+    setModeMenuOpen(false)
+    if ((meta?.permissionMode ?? 'bypassPermissions') === mode) return
+    setSwitchingMode(true)
+    try {
+      await client.updatePermissionMode(sessionId, mode)
+      // 成功后以本地切换为准（服务端也会广播 permission_mode_changed，两条路殊途同归）
+      setMeta((previous) => (previous ? { ...previous, permissionMode: mode } : previous))
+    } catch (error) {
+      setNotice(`切换权限模式失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setSwitchingMode(false)
+    }
+  }, [sessionId, switchingMode, meta])
 
   const send = async (): Promise<void> => {
     const text = input.trim()
@@ -595,13 +630,13 @@ function App(): React.ReactElement {
     <div className="app">
       <header className="topbar">
         <button
-          className={`icon-btn ${autoApprove ? 'on' : ''}`}
-          onClick={toggleAutoApprove}
-          title={autoApprove
-            ? '自动批准已开启：网页收到工具确认会直接允许，并登记为本会话免确认'
-            : '自动批准已关闭：工具确认需要在这里手动点'}
+          className={`icon-btn ${permissionMode === 'bypassPermissions' ? '' : 'on'}`}
+          onClick={() => setModeMenuOpen((previous) => !previous)}
+          aria-expanded={modeMenuOpen}
+          aria-haspopup="menu"
+          title={`权限模式：${currentMode.label} —— ${currentMode.hint}`}
         >
-          {autoApprove ? '自动' : '手动'}
+          {currentMode.short}
         </button>
         <div className="title-pill" title={meta?.title || sessionId}>
           <span className="title-text">{meta?.title || 'Profer 会话'}</span>
@@ -611,6 +646,29 @@ function App(): React.ReactElement {
           <span className="label">{connected ? '在线' : connection}</span>
         </div>
       </header>
+      {modeMenuOpen && (
+        <>
+          <div className="menu-scrim" onClick={() => setModeMenuOpen(false)} />
+          <div className="menu" role="menu" aria-label="权限模式">
+            {PERMISSION_MODES.map((entry) => (
+              <button
+                key={entry.mode}
+                className={`menu-item ${entry.mode === permissionMode ? 'active' : ''}`}
+                role="menuitemradio"
+                aria-checked={entry.mode === permissionMode}
+                disabled={switchingMode}
+                onClick={() => void switchPermissionMode(entry.mode)}
+              >
+                <span className="menu-item-text">
+                  <span className="menu-item-label">{entry.label}</span>
+                  <span className="menu-item-hint">{entry.hint}</span>
+                </span>
+                {entry.mode === permissionMode && <span className="menu-check" aria-hidden="true">✓</span>}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
       {goal
         ? <GoalBar goal={goal} busy={acting} onAction={(action) => void runGoalAction(action)} />
         : connected
