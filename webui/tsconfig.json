@@ -28,6 +28,7 @@
     "goal.tsx",
     "visualization.tsx",
     "message-page.ts",
+    "page-title.ts",
     "../src/renderer/pocket/ws-client.ts",
     "../src/renderer/pocket/sdk-message-slim.ts"
   ],

@@ -18,6 +18,7 @@ import { TurnImages, extractTurnExtras, stripContextBlocks, type ImageLoadResult
 import { TurnProcess } from './turn-process'
 import { buildAssistantTimeline } from './turn-timeline'
 import { OLDER_PAGE, decodeMessagePage, mergePrepend, tailPageSize } from './message-page'
+import { applyPageTitle } from './page-title'
 import { GoalBar, GoalLauncher, normalizeGoal, type GoalAction, type GoalState } from './goal'
 import { VisualizationList, normalizeVisualizations, type VisualizationItem } from './visualization'
 import { WsClient, defaultWsUrl } from '../src/renderer/pocket/ws-client'
@@ -192,6 +193,13 @@ function App(): React.ReactElement {
     return visualizations.filter((item) => !matched.has(item.toolCallId))
   }, [timelines, visualizations])
 
+  // 标签页名字就是会话名：同时开多个会话页时，光看标签就能认出哪个是哪个。
+  // 首屏标题已由服务端按会话名注入，所以会话信息没到之前什么都不做 —— 否则会先冲回兜底文案。
+  React.useEffect(() => {
+    if (!meta) return
+    applyPageTitle(meta.title)
+  }, [meta])
+
   // 菜单开着时能用 Esc 关掉，否则手机返回键/键盘都会觉得被卡住
   React.useEffect(() => {
     if (!modeMenuOpen) return
@@ -345,6 +353,30 @@ function App(): React.ReactElement {
     }
   }, [sessionId, connected])
 
+  /**
+   * 会话信息（标题 / 模型 / 工作区 / 权限模式）。
+   *
+   * 标题不是一次性的：新会话的标题由模型在首轮之后自动生成，页面在这一轮之前打开时
+   * 拿到的是空标题，所以轮次结束后要重新取一次。
+   */
+  const loadSessionMeta = React.useCallback(async (client: WsClient): Promise<void> => {
+    try {
+      const detail = await client.sessionDetail(sessionId) as { meta?: Record<string, unknown>; data?: { meta?: Record<string, unknown> } } | null
+      const raw = detail?.meta ?? detail?.data?.meta ?? null
+      if (!raw) return
+      setMeta({
+        // 空标题保持空串，由标题栏与标签页各自决定兜底文案（不要拿 sessionId 当名字）
+        title: typeof raw.title === 'string' ? raw.title.trim() : '',
+        channelId: typeof raw.channelId === 'string' ? raw.channelId : '',
+        modelId: typeof raw.modelId === 'string' ? raw.modelId : undefined,
+        workspaceId: typeof raw.workspaceId === 'string' ? raw.workspaceId : undefined,
+        permissionMode: normalizePermissionMode(raw.permissionMode),
+      })
+    } catch (error) {
+      setNotice(`读取会话信息失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }, [sessionId])
+
   React.useEffect(() => {
     if (!sessionId || !token) {
       setConnection('缺少会话 ID 或访问凭据')
@@ -447,6 +479,8 @@ function App(): React.ReactElement {
             void reload(client)
             void loadGoal(client)
             void loadVisualizations(client)
+            // 首轮之后标题才会被自动生成，结束后重新取一次，标签页才不会一直停在兜底文案
+            void loadSessionMeta(client)
           }
         }
       },
@@ -465,21 +499,8 @@ function App(): React.ReactElement {
         setNotice('连接超时，请确认 Profer 的 Web 会话已启用后刷新页面重试')
         return
       }
-      try {
-        const detail = await client.sessionDetail(sessionId) as { meta?: Record<string, unknown>; data?: { meta?: Record<string, unknown> } } | null
-        const raw = detail?.meta ?? detail?.data?.meta ?? null
-        if (raw) {
-          setMeta({
-            title: typeof raw.title === 'string' ? raw.title : sessionId,
-            channelId: typeof raw.channelId === 'string' ? raw.channelId : '',
-            modelId: typeof raw.modelId === 'string' ? raw.modelId : undefined,
-            workspaceId: typeof raw.workspaceId === 'string' ? raw.workspaceId : undefined,
-            permissionMode: normalizePermissionMode(raw.permissionMode),
-          })
-        }
-      } catch (error) {
-        setNotice(`读取会话信息失败：${error instanceof Error ? error.message : String(error)}`)
-      }
+      // 会话信息失败不该拦住消息读取：loadSessionMeta 自己吞掉异常，只留一条 notice
+      await loadSessionMeta(client)
       await reload(client)
       await loadInteractions(client)
       await loadGoal(client)
@@ -491,7 +512,7 @@ function App(): React.ReactElement {
       client.disconnect()
       clientRef.current = null
     }
-  }, [sessionId, token, reload, loadInteractions, loadGoal, loadVisualizations])
+  }, [sessionId, token, reload, loadInteractions, loadGoal, loadVisualizations, loadSessionMeta])
 
   const respondPermission = React.useCallback(async (
     requestId: string,
