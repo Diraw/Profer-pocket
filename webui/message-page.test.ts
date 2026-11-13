@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { SDKMessage } from '@profer/shared'
-import { INITIAL_PAGE, decodeMessagePage, mergePrepend, tailPageSize } from './message-page'
+import { INITIAL_PAGE, decodeMessagePage, mergePrepend, tailPageSize, upsertMessage } from './message-page'
 
 const message = (uuid: string, text = 'hi'): SDKMessage =>
   ({ uuid, type: 'assistant', message: { role: 'assistant', content: text } } as unknown as SDKMessage)
@@ -75,5 +75,69 @@ describe('消息分页：尾部窗口大小', () => {
 
   test('Given 已加载过历史 When 重取尾部 Then 覆盖当前持有量并留余量，避免窗口往前滑', () => {
     expect(tailPageSize(200)).toBeGreaterThan(200)
+  })
+})
+
+/** partial 帧：coordinator 明言「部分帧可能没有 UUID，终稿才有」，身份只在 _provenance.messageId。 */
+const partialFrame = (text: string, opts: { messageId?: string; uuid?: string } = {}): SDKMessage =>
+  ({
+    type: 'assistant',
+    ...(opts.uuid ? { uuid: opts.uuid } : {}),
+    _partial: true,
+    _provenance: { schemaVersion: 1, runId: 'run-1', messageId: opts.messageId ?? 'msg-1', author: { type: 'agent', id: 's1' } },
+    message: { role: 'assistant', content: [{ type: 'text', text }] },
+  } as unknown as SDKMessage)
+
+/** 终稿：带 provider uuid，与 partial 共享同一个 messageId。 */
+const finalFrame = (text: string, uuid = 'uuid-final', messageId = 'msg-1'): SDKMessage =>
+  ({
+    type: 'assistant',
+    uuid,
+    _provenance: { schemaVersion: 1, runId: 'run-1', messageId, author: { type: 'agent', id: 's1' } },
+    message: { role: 'assistant', content: [{ type: 'text', text }] },
+  } as unknown as SDKMessage)
+
+describe('实时消息合并：按 _provenance 身份覆盖，partial 不成残条', () => {
+  test('Given partial 帧无 uuid、final 带 uuid 且同 messageId When 合并 Then 覆盖成一条（残条根因）', () => {
+    // 这正是「正文一输出完就消失、刷新又出现」的机制：只按 uuid 合并时，
+    // 每条 partial（无 uuid）都被追加，text 残条之后挂 tool_use 残条挡住 headline。
+    const list = upsertMessage([], partialFrame('你'))
+    const list2 = upsertMessage(list, partialFrame('你好'))
+    const list3 = upsertMessage(list2, finalFrame('你好', 'uuid-final'))
+    expect(list3).toHaveLength(1)
+    expect((list3[0] as { message: { content: Array<{ text: string }> } }).message.content[0].text).toBe('你好')
+  })
+
+  test('Given partial 帧各自带不同 uuid When 合并 Then 仍按 messageId 覆盖成一条', () => {
+    const list = upsertMessage([], partialFrame('你', { uuid: 'u1', messageId: 'm' }))
+    const list2 = upsertMessage(list, partialFrame('你好', { uuid: 'u2', messageId: 'm' }))
+    expect(list2).toHaveLength(1)
+  })
+
+  test('Given 两条不同 messageId 的消息 When 合并 Then 各自成条不互相覆盖', () => {
+    let list: SDKMessage[] = []
+    list = upsertMessage(list, partialFrame('a', { messageId: 'm1' }))
+    list = upsertMessage(list, partialFrame('b', { messageId: 'm2' }))
+    list = upsertMessage(list, finalFrame('a终稿', 'uuid-a', 'm1'))
+    expect(list).toHaveLength(2)
+  })
+
+  test('Given 无 _provenance 的旧消息 When 合并 Then 回退按 uuid 覆盖', () => {
+    let list = upsertMessage([], message('u1', 'old'))
+    list = upsertMessage(list, message('u1', 'new'))
+    expect(list).toHaveLength(1)
+  })
+
+  test('Given result 消息（无 uuid 无 provenance）When 合并 Then 追加不去覆盖任何东西', () => {
+    const result = { type: 'result', subtype: 'success' } as unknown as SDKMessage
+    let list = upsertMessage([finalFrame('hi')], result)
+    list = upsertMessage(list, result)
+    expect(list).toHaveLength(3)
+  })
+
+  test('Given 同身份 final 重复到达（重连重放）When 合并 Then 保持一条', () => {
+    let list = upsertMessage([], finalFrame('hi'))
+    list = upsertMessage(list, finalFrame('hi'))
+    expect(list).toHaveLength(1)
   })
 })

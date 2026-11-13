@@ -73,3 +73,38 @@ export function mergePrepend(older: SDKMessage[], current: SDKMessage[]): SDKMes
 export function tailPageSize(held: number): number {
   return Math.max(INITIAL_PAGE, held + TAIL_HEADROOM)
 }
+
+/**
+ * 消息身份：优先 `_provenance`（runId+messageId），uuid 只作兜底。
+ *
+ * **不能用 uuid 当主键**：流式 partial 帧的 uuid 不可靠 —— coordinator 明言
+ * 「部分帧可能没有 UUID，终稿才有」，且为同一条回复按 `message.id` 归一身份
+ * （`pendingAssistantId` / `logicalMessageIds` 机制）。partial 与 final 稳定共享的
+ * 只有 `_provenance.messageId`。只按 uuid 合并会把每条 partial 增量全部堆进列表
+ * （残条）：text 残条之后挂着 tool_use 残条，`findHeadlineRange` 判「正文之后还有
+ * 工具」直接收空 headline —— 表现就是「正文一输出完就消失，刷新后又出现」
+ * （刷新拉的是按 messageId 合并后的干净 JSONL）。
+ */
+export function messageIdentity(message: SDKMessage): string | undefined {
+  const record = message as { uuid?: unknown; _provenance?: { runId?: unknown; messageId?: unknown } }
+  const provenance = record._provenance
+  if (provenance && typeof provenance.runId === 'string' && typeof provenance.messageId === 'string') {
+    return `p:${provenance.runId}:${provenance.messageId}`
+  }
+  if (typeof record.uuid === 'string' && record.uuid) return `u:${record.uuid}`
+  return undefined
+}
+
+/** 流式期间同一回合会落多行快照；按身份覆盖而不是追加，避免重复气泡与残条。 */
+export function upsertMessage(list: SDKMessage[], incoming: SDKMessage): SDKMessage[] {
+  const identity = messageIdentity(incoming)
+  if (identity) {
+    const index = list.findIndex((item) => messageIdentity(item) === identity)
+    if (index >= 0) {
+      const next = list.slice()
+      next[index] = incoming
+      return next
+    }
+  }
+  return [...list, incoming]
+}

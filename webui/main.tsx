@@ -16,7 +16,8 @@ import type { SDKMessage } from '@profer/shared'
 import { groupIntoTurns, toTranscript, type MessageGroup } from '@profer/session-core'
 import { TurnAttachments, TurnImages, extractTurnExtras, stripContextBlocks, type ImageLoadResult } from './turn-extras'
 import { TurnProcess } from './turn-process'
-import { buildAssistantTimeline, isTurnSettled, turnHasTrailingPendingTool } from './turn-timeline'
+import { buildAssistantTimeline, isTurnFinished, isTurnSettled, turnHasTrailingPendingTool } from './turn-timeline'
+import { DiagOverlay, type DiagData, type DiagMessageSummary } from './diag'
 import {
   SOURCE_LABELS,
   describeUsage,
@@ -27,7 +28,7 @@ import {
   resolveTurnTime,
   sumTurnUsage,
 } from './turn-meta'
-import { OLDER_PAGE, decodeMessagePage, mergePrepend, tailPageSize } from './message-page'
+import { OLDER_PAGE, decodeMessagePage, mergePrepend, tailPageSize, upsertMessage } from './message-page'
 import { FOLLOW_DEFAULT, modelLabelFor, normalizeChannelModels, resolveStrengthState, type ModelOption } from './model-selection'
 import { SessionSettingsMenu, describeSessionModel } from './session-settings'
 import { PresetPanel } from './preset-panel'
@@ -126,6 +127,17 @@ declare global {
 declare const __WEBUI_BUILD__: string
 console.info('[profer-webui] build', __WEBUI_BUILD__)
 
+/**
+ * iOS Safari / 部分安卓 Chrome 的前进后退缓存（bfcache）会**连 JS 堆与 WebSocket
+ * 一起冻结恢复**：ws-client 的重连定时器在冻结期间不跑，页面永远停在恢复那一刻的
+ * DOM —— 表现为「正文输出到一半卡住、过程组不收、之后什么都不更新」，且用户以为
+ * 刷新过了（返回标签页是缓存恢复，不是重新加载）。持久化恢复时直接整体重载：
+ * 重新加载页面、重新拉最新 bundle、重建连接与状态。
+ */
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) window.location.reload()
+})
+
 /** 空态快捷入口：只填进输入框，不直接发出去，避免误触消耗一轮。 */
 const QUICK_PROMPTS = ['总结一下当前进度', '接下来该做什么', '解释一下刚才的改动']
 
@@ -203,20 +215,6 @@ function isPresetReference(value: unknown): value is PresetReference {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   return typeof (value as { presetId?: unknown }).presetId === 'string'
     && (value as { presetId: string }).presetId.length > 0
-}
-
-/** 流式期间同一回合会落多行快照；按 uuid 覆盖而不是追加，避免重复气泡。 */
-function upsertMessage(list: SDKMessage[], incoming: SDKMessage): SDKMessage[] {
-  const uuid = (incoming as { uuid?: string }).uuid
-  if (uuid) {
-    const index = list.findIndex((item) => (item as { uuid?: string }).uuid === uuid)
-    if (index >= 0) {
-      const next = list.slice()
-      next[index] = incoming
-      return next
-    }
-  }
-  return [...list, incoming]
 }
 
 function upsertById<T extends { requestId: string }>(list: T[], item: T): T[] {
@@ -341,6 +339,54 @@ function App(): React.ReactElement {
     return false
   }, [groups, timelines])
   const sessionActive = running && !lastTurnFinished
+  /**
+   * 诊断数据（`?diag=1` 时右下角浮层展示）。
+   *
+   * 排查「实时流里 headline 消失、刷新后出现」这类问题：刷新拉取的数据是干净的，
+   * 坏的是实时累积态，必须把消息序列与推导结果原样打出来对比 —— 尤其是最后一轮
+   * 的 items（哪个块把 headline 挡了）与最近几条消息的 uuid/partial（残条来源）。
+   */
+  const diagData = React.useMemo<DiagData>(() => {
+    const summary = (message: SDKMessage): DiagMessageSummary => {
+      const content = (message as { message?: { content?: unknown } }).message?.content
+      const blocks = Array.isArray(content)
+        ? content.flatMap((block): string[] =>
+          block && typeof block === 'object' && typeof (block as { type?: unknown }).type === 'string'
+            ? [(block as { type: string }).type]
+            : [])
+        : []
+      return {
+        t: String(message.type ?? ''),
+        u: String((message as { uuid?: string }).uuid ?? '').slice(0, 8),
+        p: (message as { _partial?: boolean })._partial === true,
+        b: blocks,
+      }
+    }
+    const lastGroup = lastNonSystem.index >= 0 ? groups[lastNonSystem.index] : undefined
+    const lastTimeline = lastNonSystem.index >= 0 ? timelines[lastNonSystem.index] : undefined
+    return {
+      build: __WEBUI_BUILD__,
+      connected,
+      running,
+      sessionActive,
+      lastTurnFinished,
+      lastNonSystem: { index: lastNonSystem.index, pending: lastNonSystem.pending },
+      messages: messages.slice(-8).map(summary),
+      lastTurn: lastGroup?.type === 'assistant-turn' && lastTimeline
+        ? {
+          headlineLen: lastTimeline.headline.length,
+          headline: lastTimeline.headline.slice(0, 90),
+          items: lastTimeline.items.map((item) => item.kind === 'tool'
+            ? `tool:${item.tool.done ? 'done' : 'PEND'}:${item.tool.name}`
+            : item.kind),
+          pendingTools: lastTimeline.items.filter((item) => item.kind === 'tool' && !item.tool.done).length,
+          trailingPending: turnHasTrailingPendingTool(lastGroup),
+          finished: isTurnFinished(lastGroup),
+          settled: isTurnSettled(lastGroup, lastTimeline),
+        }
+        : null,
+    }
+  }, [messages, groups, timelines, lastNonSystem, running, sessionActive, lastTurnFinished, connected])
   /** 内核决定用哪套推理档位；缺省按 claude 处理（历史会话与旧服务端都是这个默认） */
   const agentRuntime = meta?.agentRuntime ?? 'claude'
   /** 当前内核可切的模型（过滤规则与服务端 update_session_model 同一份） */
@@ -1636,6 +1682,7 @@ function App(): React.ReactElement {
           <span>构建 {__WEBUI_BUILD__}</span>
         </div>
       </div>
+      <DiagOverlay data={diagData} />
     </div>
   )
 }
