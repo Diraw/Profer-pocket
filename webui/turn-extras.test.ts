@@ -119,8 +119,10 @@ describe('回合工具与图片提取', () => {
   })
 
   test('Given 用户回合或空内容 When 提取 Then 返回空数组', () => {
-    expect(extractTurnExtras({ type: 'user', message: {} } as unknown as MessageGroup)).toEqual({ tools: [], imagePaths: [] })
-    expect(extractTurnExtras(turn([{ type: 'text', text: '纯文本' }]))).toEqual({ tools: [], imagePaths: [] })
+    expect(extractTurnExtras({ type: 'user', message: {} } as unknown as MessageGroup))
+      .toEqual({ tools: [], imagePaths: [], attachedFiles: [] })
+    expect(extractTurnExtras(turn([{ type: 'text', text: '纯文本' }])))
+      .toEqual({ tools: [], imagePaths: [], attachedFiles: [] })
   })
 
   test('Given 工具结果带 is_error When 提取 Then 标记该次调用失败，供界面着色', () => {
@@ -139,5 +141,28 @@ describe('回合工具与图片提取', () => {
       { type: 'tool_result', tool_use_id: 't1' },
     ]))
     expect(result.tools[0]).toEqual({ id: 't1', name: 'Bash', detail: 'true' })
+  })
+})
+
+describe('用户消息的附件提取', () => {
+  const userTurn = (text: string): MessageGroup => ({
+    type: 'user',
+    message: { type: 'user', message: { content: [{ type: 'text', text }] } },
+  } as unknown as MessageGroup)
+
+  test('Given 带附件块的用户消息 When 提取 Then 出 chip 数据，图片路径交给 TurnImages', () => {
+    const raw = '<attached_files>\n- shot.png: /s/shot.png\n- note.pdf: /s/note.pdf\n</attached_files>\n\n看下附件'
+    const extras = extractTurnExtras(userTurn(raw))
+    expect(extras.attachedFiles).toEqual([
+      { filename: 'shot.png', path: '/s/shot.png' },
+      { filename: 'note.pdf', path: '/s/note.pdf' },
+    ])
+    expect(extras.imagePaths).toEqual(['/s/shot.png'])
+  })
+
+  test('Given 纯文本用户消息 When 提取 Then 没有附件也没有图片', () => {
+    const extras = extractTurnExtras(userTurn('帮我看下这个'))
+    expect(extras.attachedFiles).toEqual([])
+    expect(extras.imagePaths).toEqual([])
   })
 })

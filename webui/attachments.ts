@@ -45,11 +45,53 @@ export function base64FromDataUrl(dataUrl: string): string {
  * 附件-only 发送时的兜底文案。
  *
  * 不能把 `<attached_files>` 块当正文发出去：那块是给模型看的路径清单，
- * 用户气泡里出现一堆绝对路径既难看也没意义（`rawUserMessage` 会保留这段文案）。
+ * 用户气泡里出现一堆绝对路径既难看也没意义。
  */
 export function resolveSendText(text: string, attachmentCount: number): string {
   const trimmed = text.trim()
   if (trimmed) return trimmed
   if (attachmentCount > 0) return '请查看我上传的附件。'
   return ''
+}
+
+export interface AttachedFileRef {
+  /** 展示用的名字（服务端写的是 label，通常就是文件名） */
+  filename: string
+  /** 会话目录内的绝对路径；可能缺失（旧数据只有文件名） */
+  path?: string
+}
+
+/**
+ * 解析用户消息里的 `<attached_files>` 块。
+ *
+ * 桌面端 `parseAttachedFiles` 的同一格式：`- 名称: 绝对路径`；此外兼容
+ * `<file path="..." />` 那种引用写法。返回剥掉块之后的正文，气泡里不会露出路径清单。
+ *
+ * 注意 Windows 路径带冒号（`C:\...`），所以按**第一个** `: ` 切，不能用 split(':')。
+ */
+export function parseAttachedFiles(text: string): { files: AttachedFileRef[]; text: string } {
+  const regex = /<attached_files>\s*([\s\S]*?)\s*<\/attached_files>\s*/
+  const match = text.match(regex)
+  if (!match) return { files: [], text: text.trim() }
+  const files: AttachedFileRef[] = []
+  for (const line of match[1]!.split('\n')) {
+    const trimmed = line.trim()
+    // `- label: path` —— 用 lastIndexOf 也不行（路径里可能还有冒号），取第一个 ': '
+    const dash = trimmed.match(/^-\s+(.+?):\s+(.+)$/)
+    if (dash) {
+      files.push({ filename: dash[1]!.trim(), path: dash[2]!.trim() })
+      continue
+    }
+    const fileTag = trimmed.match(/^<file\s+path=["'](.+?)["']\s*\/?>$/)
+    if (fileTag) {
+      const path = fileTag[1]!.trim()
+      files.push({ filename: path.split(/[\\/]/).pop() ?? path, path })
+    }
+  }
+  return { files, text: text.replace(regex, '').trim() }
+}
+
+/** 附件里能当图片预览的类型（与桌面 isImageFile 同口径）。 */
+export function isImageAttachment(filename: string): boolean {
+  return /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(filename)
 }

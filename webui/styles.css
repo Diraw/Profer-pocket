@@ -336,6 +336,49 @@ body {
 }
 .tm-usage { letter-spacing: .2px; }
 
+/* 用户气泡里的附件 chip：只露文件名，路径放在 title 里 */
+.turn-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+.turn-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 3px 8px;
+  border: 1px solid var(--outline);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.turn-attachment-icon {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  opacity: .65;
+}
+.turn-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.turn-attachment-kind {
+  flex: none;
+  padding-left: 4px;
+  border-left: 1px solid var(--hairline);
+  font-size: 10px;
+  opacity: .7;
+}
+
 .body { min-width: 0; font-size: 15px; line-height: 1.62; overflow-wrap: anywhere; }
 .body > :first-child { margin-top: 0; }
 .body > :last-child { margin-bottom: 0; }

@@ -6,6 +6,7 @@
  */
 import * as React from 'react'
 import type { MessageGroup } from '@profer/session-core'
+import { isImageAttachment, parseAttachedFiles, type AttachedFileRef } from './attachments'
 
 /** 主仓 group.ts 的 USER_CONTEXT_BLOCK_PATTERNS；pocket 的 toTranscript 少剥了后两个。 */
 export function stripContextBlocks(text: string): string {
@@ -30,6 +31,19 @@ export interface ToolCall {
 export interface TurnExtrasData {
   tools: ToolCall[]
   imagePaths: string[]
+  /** 这条用户消息带的附件（从 `<attached_files>` 块解析，不是模型看到的路径清单） */
+  attachedFiles: AttachedFileRef[]
+}
+
+/** 用户消息正文：content 可能是纯字符串，也可能是 [{type:'text',text}]。 */
+function readUserText(message: unknown): string {
+  const record = message as { message?: { content?: unknown } } | undefined
+  const content = record?.message?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((block) => isRecord(block) && typeof block.text === 'string' ? block.text : '')
+    .join('\n')
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -95,7 +109,20 @@ function readImageRefPath(value: unknown): string | undefined {
  * 绝对路径，服务端按当前会话授权根解析会拒绝。
  */
 export function extractTurnExtras(group: MessageGroup): TurnExtrasData {
-  if (group.type !== 'assistant-turn') return { tools: [], imagePaths: [] }
+  if (group.type !== 'assistant-turn') {
+    if (group.type !== 'user') return { tools: [], imagePaths: [], attachedFiles: [] }
+    // 附件块留在消息正文里（各端 transcript 会剥掉它再显示）。在这里先解析成
+    // 文件名 + 路径：气泡上挂 chip，图片附件顺便交给 TurnImages 出缩略图。
+    const { files } = parseAttachedFiles(readUserText(group.message))
+    return {
+      tools: [],
+      attachedFiles: files,
+      imagePaths: files
+        .filter((file) => file.path && isImageAttachment(file.filename))
+        .map((file) => file.path!)
+        .filter((path, index, list) => list.indexOf(path) === index),
+    }
+  }
   const tools: ToolCall[] = []
   const imageToolPaths = new Map<string, string>()
   const resolvedPaths = new Map<string, string>()
@@ -154,7 +181,24 @@ export function extractTurnExtras(group: MessageGroup): TurnExtrasData {
       ? tools
       : tools.map((tool) => (failedIds.has(tool.id) ? { ...tool, failed: true } : tool)),
     imagePaths,
+    attachedFiles: [],
   }
+}
+
+/** 用户气泡里的附件 chip：只显示文件名，不把绝对路径铺给用户看。 */
+export function TurnAttachments({ files }: { files: AttachedFileRef[] }): React.ReactElement | null {
+  if (files.length === 0) return null
+  return (
+    <div className="turn-attachments">
+      {files.map((file, index) => (
+        <span className="turn-attachment-chip" key={`${file.filename}-${index}`} title={file.path ?? file.filename}>
+          <span className="turn-attachment-icon" aria-hidden="true" />
+          <span className="turn-attachment-name">{file.filename}</span>
+          {isImageAttachment(file.filename) && <span className="turn-attachment-kind">图片</span>}
+        </span>
+      ))}
+    </div>
+  )
 }
 
 /** 图片 data URL 缓存：同一张图在多次重渲染 / 重新加载历史时不重复走 WS。 */

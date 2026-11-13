@@ -4,6 +4,8 @@ import {
   MAX_ATTACHMENT_COUNT,
   base64FromDataUrl,
   formatBytes,
+  isImageAttachment,
+  parseAttachedFiles,
   resolveSendText,
   validateAttachmentFile,
 } from './attachments'
@@ -63,5 +65,49 @@ describe('发送文案', () => {
 
   test('Given 既没正文也没附件 When 解析 Then 空串（发送键保持禁用）', () => {
     expect(resolveSendText('', 0)).toBe('')
+  })
+})
+
+describe('消息里的附件块解析', () => {
+  test('Given 服务端写入的标准块 When 解析 Then 取出文件名与路径，正文不带路径清单', () => {
+    const raw = '<attached_files>\n- image.png: C:\\Users\\x\\session\\image.png\n- 说明.pdf: C:\\Users\\x\\session\\说明.pdf\n</attached_files>\n\n现在这个项目干净了吗？'
+    const { files, text } = parseAttachedFiles(raw)
+    expect(files).toEqual([
+      { filename: 'image.png', path: 'C:\\Users\\x\\session\\image.png' },
+      { filename: '说明.pdf', path: 'C:\\Users\\x\\session\\说明.pdf' },
+    ])
+    expect(text).toBe('现在这个项目干净了吗？')
+    expect(text).not.toContain('attached_files')
+  })
+
+  test('Given Windows 绝对路径带冒号 When 解析 Then 只在第一个 ": " 处切分', () => {
+    const raw = '<attached_files>\n- a.txt: C:\\a\\b\\a.txt\n</attached_files>\n'
+    expect(parseAttachedFiles(raw).files[0]?.path).toBe('C:\\a\\b\\a.txt')
+  })
+
+  test('Given <file path> 引用写法 When 解析 Then 文件名从路径尾部取', () => {
+    const raw = '<attached_files>\n<file path="/tmp/a.ts" />\n</attached_files>\n帮我改成 TypeScript'
+    const { files, text } = parseAttachedFiles(raw)
+    expect(files).toEqual([{ filename: 'a.ts', path: '/tmp/a.ts' }])
+    expect(text).toBe('帮我改成 TypeScript')
+  })
+
+  test('Given 没有附件块 When 解析 Then 原样返回正文，不误伤带尖括号的文字', () => {
+    const text = '请解释 <div> 和 </div> 的区别'
+    expect(parseAttachedFiles(text)).toEqual({ files: [], text })
+  })
+
+  test('Given 附件-only 消息 When 解析 Then files 有值、正文是兜底文案', () => {
+    const raw = '<attached_files>\n- a.png: /s/a.png\n</attached_files>\n\n请查看我上传的附件。'
+    const result = parseAttachedFiles(raw)
+    expect(result.files).toHaveLength(1)
+    expect(result.text).toBe('请查看我上传的附件。')
+  })
+
+  test('Given 图片与非图片附件 When 判定类型 Then 只把图片标出来', () => {
+    expect(isImageAttachment('a.PNG')).toBe(true)
+    expect(isImageAttachment('a.svg')).toBe(true)
+    expect(isImageAttachment('a.pdf')).toBe(false)
+    expect(isImageAttachment('a.txt')).toBe(false)
   })
 })

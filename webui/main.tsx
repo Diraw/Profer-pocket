@@ -14,7 +14,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { SDKMessage } from '@profer/shared'
 import { groupIntoTurns, toTranscript } from '@profer/session-core'
-import { TurnImages, extractTurnExtras, stripContextBlocks, type ImageLoadResult } from './turn-extras'
+import { TurnAttachments, TurnImages, extractTurnExtras, stripContextBlocks, type ImageLoadResult } from './turn-extras'
 import { TurnProcess } from './turn-process'
 import { buildAssistantTimeline, isTurnSettled } from './turn-timeline'
 import {
@@ -1423,9 +1423,10 @@ function App(): React.ReactElement {
                 )}
                 <div className={`turn ${turn.role === 'user' ? 'user' : 'assistant'}`}>
                   {isAssistant && timeline && <TurnProcess timeline={timeline} live={live} />}
-                  {body && (
+                  {(body || (turn.role === 'user' && (extra?.attachedFiles.length ?? 0) > 0)) && (
                     <div className="body">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+                      {turn.role === 'user' && <TurnAttachments files={extra?.attachedFiles ?? []} />}
+                      {body && <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>}
                     </div>
                   )}
                   <TurnImages imagePaths={extra?.imagePaths ?? []} loadImage={loadImage} />
