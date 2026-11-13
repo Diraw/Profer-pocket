@@ -59,10 +59,11 @@ describe('token 消耗', () => {
     expect(describeUsage(usage!)).toBe('↑4k ↓300')
   })
 
-  test('Given 同一条消息的多份流式快照 When 汇总 Then 按 message.id 去重，不重复计数', () => {
+  test('Given 同一条消息的多份流式快照 When 汇总 Then 按 message.id 去重，只取最后一份', () => {
     const usage = sumTurnUsage(assistantTurn([
-      { input: 1000, output: 200, id: 'msg_1' },
-      { input: 1000, output: 200, id: 'msg_1' },
+      { input: 1000, output: 50, id: 'msg_1' },
+      { input: 1000, output: 120, id: 'msg_1' },
+      // 最后一份最完整：不能取第一份，否则流式期间会少算输出
       { input: 1000, output: 200, id: 'msg_1' },
     ]))
     expect(usage).toEqual({ input: 1000, output: 200, cacheRead: 0, cacheCreate: 0 })

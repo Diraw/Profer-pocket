@@ -55,27 +55,30 @@ function messageKey(message: unknown, index: number): string {
 /** 一轮的总 token。没有 usage（例如本地模型）时返回 null，界面就不显示。 */
 export function sumTurnUsage(group: MessageGroup | undefined): TurnUsage | null {
   if (!group || group.type !== 'assistant-turn') return null
-  const seen = new Set<string>()
+  // 同一条的后续快照是「更完整的版本」（output 只会更多），所以同键**后写覆盖**，
+  // 不能取第一份，否则流式期间会少算。
+  const latest = new Map<string, unknown>()
+  group.assistantMessages.forEach((message, index) => {
+    latest.set(messageKey(message, index), message)
+  })
+
   const usage: TurnUsage = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 }
   let found = false
 
-  group.assistantMessages.forEach((message, index) => {
-    const key = messageKey(message, index)
-    if (seen.has(key)) return
-    seen.add(key)
+  for (const message of latest.values()) {
     const raw = (message as unknown as { message?: { usage?: unknown } }).message?.usage
-    if (!isRecord(raw)) return
+    if (!isRecord(raw)) continue
     const input = numberOrZero(raw.input_tokens)
     const output = numberOrZero(raw.output_tokens)
     const cacheRead = numberOrZero(raw.cache_read_input_tokens)
     const cacheCreate = numberOrZero(raw.cache_creation_input_tokens)
-    if (input + output + cacheRead + cacheCreate === 0) return
+    if (input + output + cacheRead + cacheCreate === 0) continue
     found = true
     usage.input += input
     usage.output += output
     usage.cacheRead += cacheRead
     usage.cacheCreate += cacheCreate
-  })
+  }
 
   return found ? usage : null
 }
