@@ -690,6 +690,15 @@ export class WsClient {
     return this.sendCommand({ type: 'respond_exit_plan_mode', requestId, action, feedback })
   }
 
+  /**
+   * 确认模型主动提议的 Goal（对齐桌面端 RESPOND_GOAL_PROPOSAL）。
+   * 批准时由主进程用提议的目标与契约启动 Goal；失败会返回 ok:false，
+   * 提议仍留在队列里，调用方可以继续展示卡片并重试。
+   */
+  respondGoalProposal(proposalId: string, accepted: boolean): Promise<unknown> {
+    return this.sendCommand({ type: 'respond_goal_proposal', proposalId, accepted })
+  }
+
   updateSessionModel(sessionId: string, channelId?: string, modelId?: string, expectedRevision?: number): Promise<unknown> {
     return this.sendCommand({ type: 'update_session_model', sessionId, ...(channelId ? { channelId } : {}), ...(modelId ? { modelId } : {}) }, { expectedRevision })
   }
