@@ -1095,8 +1095,28 @@ export class WsClient {
     return this.sendCommand({ type: 'get_goal_history', sessionId })
   }
 
-  startGoal(input: { sessionId: string; goal: string }): Promise<unknown> {
+  /** 启动持续目标；契约三项都是可选文本（验收 / 约束 / 停止条件）。 */
+  startGoal(input: {
+    sessionId: string
+    goal: string
+    contract?: { verification?: string; constraints?: string; stopWhen?: string }
+  }): Promise<unknown> {
     return this.sendCommand({ type: 'start_goal', ...input })
+  }
+
+  /**
+   * 修改目标 / 契约 / 预算。
+   *
+   * `limits` 里 `null` 表示清除该项预算（改为不限）；`maxConsecutiveFailures` 必填，
+   * 服务端只收正整数的安全整数（时长是毫秒）。
+   */
+  updateGoal(input: {
+    sessionId: string
+    goal?: string
+    contract?: { verification?: string; constraints?: string; stopWhen?: string }
+    limits?: { maxIterations?: number | null; maxDurationMs?: number | null; maxTokens?: number | null; maxConsecutiveFailures?: number }
+  }): Promise<unknown> {
+    return this.sendCommand({ type: 'update_goal', ...input })
   }
 
   pauseGoal(sessionId: string): Promise<unknown> {

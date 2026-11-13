@@ -29,6 +29,7 @@
     "model-selection.ts",
     "session-settings.tsx",
     "goal.tsx",
+    "goal-model.ts",
     "visualization.tsx",
     "message-page.ts",
     "page-title.ts",

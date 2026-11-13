@@ -32,7 +32,8 @@ import { FOLLOW_DEFAULT, modelLabelFor, normalizeChannelModels, resolveStrengthS
 import { SessionSettingsMenu, describeSessionModel } from './session-settings'
 import { applyPageTitle } from './page-title'
 import { base64FromDataUrl, formatBytes, resolveSendText, validateAttachmentFile } from './attachments'
-import { GoalBar, GoalLauncher, normalizeGoal, type GoalAction, type GoalState } from './goal'
+import { GoalBar, GoalEditor, GoalLauncher, type GoalAction } from './goal'
+import { normalizeGoal, normalizeGoalHistory, type GoalContract, type GoalLimits, type GoalState } from './goal-model'
 import { VisualizationList, normalizeVisualizations, type VisualizationItem } from './visualization'
 import { WsClient, defaultWsUrl } from '../src/renderer/pocket/ws-client'
 import {
@@ -222,6 +223,9 @@ function App(): React.ReactElement {
   const [exitPlans, setExitPlans] = React.useState<ExitPlanItem[]>([])
   const [goalProposals, setGoalProposals] = React.useState<GoalProposalItem[]>([])
   const [goal, setGoal] = React.useState<GoalState | null>(null)
+  /** 归档 Goal：清除/完成后的历史，只在展开时才有内容可看，但仍然随清除动作刷新 */
+  const [goalHistory, setGoalHistory] = React.useState<GoalState[]>([])
+  const [goalEditorOpen, setGoalEditorOpen] = React.useState(false)
   const [visualizations, setVisualizations] = React.useState<VisualizationItem[]>([])
   const [attachments, setAttachments] = React.useState<StagedAttachment[]>([])
   const [modeMenuOpen, setModeMenuOpen] = React.useState(false)
@@ -432,6 +436,16 @@ function App(): React.ReactElement {
     }
   }, [sessionId])
 
+  /** 归档 Goal（清除/完成的历史）。只在状态条展开时才有内容，但清除后必须刷新，否则列表是旧的。 */
+  const loadGoalHistory = React.useCallback(async (client: WsClient): Promise<void> => {
+    try {
+      const result = await client.getGoalHistory(sessionId) as { goals?: unknown } | null
+      setGoalHistory(normalizeGoalHistory(result?.goals))
+    } catch {
+      // 历史读不到不影响当前 Goal 的展示
+    }
+  }, [sessionId])
+
   /**
    * 会话内可视化记录：图表数据不在消息流里（WS 投影把 tool_use 入参压成 `{ file_path }`），
    * 只能按会话整体列出，再靠 `toolCallId` 挂回对应回合的工具调用行。
@@ -615,7 +629,10 @@ function App(): React.ReactElement {
         // Goal 每次状态变化主进程都会推一条完整状态，这里整体替换 ——
         // 状态机在电脑端，网页不做任何本地推断（重启/重连后也不会漂移）。
         if (type === 'goal_state') {
-          setGoal(normalizeGoal(proferEvent?.goal))
+          const next = normalizeGoal(proferEvent?.goal)
+          setGoal(next)
+          // 清除/完成会把当前 Goal 归档：顺手刷一次历史，否则展开区里的归档列表还是旧的
+          if (!next) void loadGoalHistory(client)
           return
         }
         // 三类阻塞交互：request 入队、resolved 出队，口径与桌面端横幅一致。
@@ -703,6 +720,7 @@ function App(): React.ReactElement {
       await reload(client)
       await loadInteractions(client)
       await loadGoal(client)
+      await loadGoalHistory(client)
       await loadVisualizations(client)
     })()
     return () => {
@@ -713,7 +731,7 @@ function App(): React.ReactElement {
       client.disconnect()
       clientRef.current = null
     }
-  }, [sessionId, token, reload, loadInteractions, loadGoal, loadVisualizations, loadSessionMeta])
+  }, [sessionId, token, reload, loadInteractions, loadGoal, loadGoalHistory, loadVisualizations, loadSessionMeta])
 
   const respondPermission = React.useCallback(async (
     requestId: string,
@@ -780,6 +798,8 @@ function App(): React.ReactElement {
       else {
         await client.clearGoal(sessionId)
         setGoal(null)
+        // 清除 = 归档，立刻刷历史，展开区不用等下一次事件
+        await loadGoalHistory(client)
         return
       }
       await loadGoal(client)
@@ -788,17 +808,54 @@ function App(): React.ReactElement {
     } finally {
       setActing(false)
     }
-  }, [acting, loadGoal, sessionId])
+  }, [acting, loadGoal, loadGoalHistory, sessionId])
 
-  const startGoal = React.useCallback(async (text: string): Promise<void> => {
+  /** 启动 Goal；契约是可选项，只有填了的字段才会带上。 */
+  const startGoal = React.useCallback(async (text: string, contract?: GoalContract): Promise<void> => {
     const client = clientRef.current
     if (!client || acting) return
     setActing(true)
     try {
-      await client.startGoal({ sessionId, goal: text })
+      await client.startGoal({ sessionId, goal: text, ...(contract ? { contract } : {}) })
       await loadGoal(client)
     } catch (error) {
       setNotice(`设定目标失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setActing(false)
+    }
+  }, [acting, loadGoal, sessionId])
+
+  /**
+   * 保存目标/契约/预算；`resume` 为真时接着恢复。
+   *
+   * 顺序必须是「先保存再恢复」：预算耗尽的 Goal 不先扩容就恢复会被主进程拒绝，
+   * 用户会以为改了没用。失败时保留编辑器，让用户能改完重试。
+   */
+  const saveGoal = React.useCallback(async (
+    patch: { goal: string; contract: GoalContract; limits: GoalLimits },
+    resume: boolean,
+  ): Promise<void> => {
+    const client = clientRef.current
+    if (!client || acting) return
+    setActing(true)
+    try {
+      await client.updateGoal({
+        sessionId,
+        goal: patch.goal,
+        contract: patch.contract,
+        limits: {
+          maxIterations: patch.limits.maxIterations ?? null,
+          maxDurationMs: patch.limits.maxDurationMs ?? null,
+          maxTokens: patch.limits.maxTokens ?? null,
+          ...(patch.limits.maxConsecutiveFailures ? { maxConsecutiveFailures: patch.limits.maxConsecutiveFailures } : {}),
+        },
+      })
+      if (resume) await client.resumeGoal(sessionId)
+      await loadGoal(client)
+      setGoalEditorOpen(false)
+      setNotice(resume ? 'Goal 已更新并恢复' : 'Goal 已更新')
+    } catch (error) {
+      setNotice(`保存 Goal 失败：${error instanceof Error ? error.message : String(error)}`)
     } finally {
       setActing(false)
     }
@@ -1079,10 +1136,28 @@ function App(): React.ReactElement {
         />
       )}
       {goal
-        ? <GoalBar goal={goal} busy={acting} onAction={(action) => void runGoalAction(action)} />
+        ? (
+          <GoalBar
+            goal={goal}
+            archives={goalHistory.filter((item) => item.id !== goal.id)}
+            busy={acting}
+            waits={{ askUser: askUsers.length, permission: permissions.length }}
+            onAction={(action) => void runGoalAction(action)}
+            onEdit={() => setGoalEditorOpen(true)}
+          />
+        )
         : connected
-          ? <GoalLauncher busy={acting} onStart={(text) => void startGoal(text)} />
+          ? <GoalLauncher busy={acting} onStart={(text, contract) => void startGoal(text, contract)} />
           : null}
+      {/* 编辑面板做成覆盖层：它比状态条高得多，塞进状态条会把消息区挤到没有 */}
+      {goalEditorOpen && goal && (
+        <GoalEditor
+          goal={goal}
+          busy={acting}
+          onClose={() => setGoalEditorOpen(false)}
+          onSave={(patch, resume) => void saveGoal(patch, resume)}
+        />
+      )}
       {notice && <div className="notice">{notice}</div>}
       <div className="stage">
         <div className="stream" ref={scrollRef} onScroll={handleStreamScroll}>

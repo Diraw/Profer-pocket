@@ -1065,18 +1065,69 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 .goal-status.completed { border-color: var(--hairline); background: var(--surface); color: var(--info); }
 .goal-text { flex: 1; min-width: 0; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .goal-meta { flex: none; color: #7d7a75; font-size: 11px; }
-.goal-detail {
-  display: -webkit-box;
-  margin-top: 6px;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 11.5px;
-  word-break: break-word;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+/* 第二行：状态细节（等审批 / 重试倒计时 / 空闲续跑）+ 轮次与用量 */
+.goal-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-top: 4px;
+  font-size: 11px;
 }
-.goal-actions { display: flex; gap: 6px; margin-top: var(--sp-2); }
-.goal-action { padding: 4px 12px; font-size: 12px; }
+.goal-state { color: var(--muted); }
+.goal-meta { color: #7d7a75; font-variant-numeric: tabular-nums; }
+
+/* 预算耗尽：这是「需要你处理」的状态，单独占一行，不要藏在展开区里 */
+.goal-warn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  color: var(--warning);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.goal-warn > span { flex: 1; min-width: 0; word-break: break-word; }
+
+/* 展开区自己滚：十轮摘要 + 归档很容易超过一屏，撑开会把消息区挤没 */
+.goal-expanded {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 40vh;
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-top: 1px solid var(--hairline);
+  font-size: 11.5px;
+}
+.goal-row { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; }
+.goal-row-label {
+  flex: none;
+  width: 48px;
+  color: #7d7a75;
+  font-size: 10.5px;
+  text-align: right;
+}
+.goal-row-value { min-width: 0; flex: 1; color: var(--muted); word-break: break-word; white-space: pre-wrap; }
+.goal-section { margin-top: 2px; color: var(--ink); font-weight: 500; }
+.goal-empty { color: #7d7a75; }
+.goal-iters { display: flex; flex-direction: column; gap: 6px; }
+.goal-iter {
+  padding: 6px 8px;
+  border-radius: var(--r-xs);
+  background: var(--surface-lowest);
+}
+.goal-iter-head { color: var(--ink); font-size: 11px; }
+.goal-iter-text { margin-top: 2px; color: var(--muted); word-break: break-word; white-space: pre-wrap; }
+.goal-iter-error { margin-top: 2px; color: var(--error); word-break: break-word; }
+.goal-archive { margin-top: 4px; }
+.goal-archive > summary { color: var(--muted); font-size: 11px; cursor: pointer; }
+.goal-archive-body { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.goal-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--sp-2); }
+.goal-action { flex: none; padding: 4px 12px; font-size: 12px; }
 .goal-action.danger { border-color: var(--error-container); color: var(--error); background: transparent; }
 .goal-new {
   /* 收起态只是一颗贴左的小按钮，不要拉成整行虚线框（那会变成页面上最响的元素） */
@@ -1113,6 +1164,75 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 .goal-launcher-row { display: flex; align-items: center; gap: var(--sp-2); margin-top: var(--sp-2); }
 .goal-launcher-row .hint { flex: 1; color: #7d7a75; font-size: 11px; }
 .goal-launcher-row button { padding: 5px 12px; font-size: 12px; }
+
+/* 契约三项：默认折叠，展开后是三条单行输入 */
+.goal-contract-toggle {
+  margin-top: var(--sp-2);
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.goal-contract-toggle:hover { color: var(--ink); }
+.goal-contract { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.goal-contract label { display: flex; flex-direction: column; gap: 3px; color: #7d7a75; font-size: 10.5px; }
+.goal-contract input {
+  padding: 6px var(--sp-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xs);
+  background: var(--surface-lowest);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+.goal-contract input:focus { border-color: var(--outline); }
+
+/* ===== Goal 编辑面板：覆盖层，不占消息区高度 ===== */
+.goal-sheet-scrim { position: fixed; inset: 0; z-index: 40; background: rgba(0, 0, 0, .48); }
+.goal-sheet {
+  position: fixed;
+  z-index: 41;
+  left: 50%;
+  top: 50%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: min(520px, calc(100% - 2 * var(--gutter)));
+  max-height: 86dvh;
+  max-height: 86vh;
+  padding: var(--sp-4);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--surface-low);
+  box-shadow: var(--float-shadow);
+  transform: translate(-50%, -50%);
+}
+.goal-sheet-head { display: flex; flex-direction: column; gap: 2px; }
+.goal-sheet-head strong { font-size: 14px; font-weight: 500; }
+.goal-sheet-desc { color: #7d7a75; font-size: 11px; line-height: 1.5; }
+.goal-field { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 11px; }
+.goal-field input, .goal-field textarea {
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xs);
+  background: var(--surface-lowest);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+  resize: vertical;
+}
+.goal-field input:focus, .goal-field textarea:focus { border-color: var(--outline); }
+.goal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
+.goal-sheet-note { margin: 0; color: #7d7a75; font-size: 10.5px; line-height: 1.6; }
+.goal-sheet-error { margin: 0; color: var(--error); font-size: 11.5px; }
+.goal-sheet-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: 2px; }
+.goal-sheet-actions button { padding: 6px 14px; font-size: 12.5px; }
 
 /* ===== 窄屏：留白收到 12，顶栏 56 ===== */
 @media (max-width: 560px) {
