@@ -119,3 +119,22 @@ export function upsertMessage(list: SDKMessage[], incoming: SDKMessage): SDKMess
   }
   return [...list, incoming]
 }
+
+/**
+ * 重拉页面与当前持有的**合并**（按身份 upsert，保持原顺序）。
+ *
+ * 与整体替换（setMessages(page)）的区别：**流式中的 partial 不落盘**，替换会把
+ * 正在输出的正文冲掉。回前台（wake / 桌面切窗口）与 requiresSnapshot 重连
+ * （游标落事件窗口外、漏帧不补发）都发生在流式中 —— 替换后漏掉的 final 不会
+ * 补发，正文消失且不恢复。合并的语义：
+ * - 页面里已有身份的消息：按 upsert 覆盖（final 覆盖 partial；partial 不覆盖 final）；
+ * - 页面里没有、当前持有的（在飞的 partial / 前置加载的更早消息）：原样保留；
+ * - 页面里新的消息：按页面顺序追加到尾部。
+ */
+export function mergeReloadPage(current: readonly SDKMessage[], page: readonly SDKMessage[]): SDKMessage[] {
+  let next = current.slice()
+  for (const message of page) {
+    next = upsertMessage(next, message)
+  }
+  return next
+}

@@ -28,7 +28,7 @@ import {
   resolveTurnTime,
   sumTurnUsage,
 } from './turn-meta'
-import { OLDER_PAGE, decodeMessagePage, mergePrepend, tailPageSize, upsertMessage } from './message-page'
+import { OLDER_PAGE, decodeMessagePage, mergePrepend, mergeReloadPage, tailPageSize, upsertMessage } from './message-page'
 import { FOLLOW_DEFAULT, modelLabelFor, normalizeChannelModels, resolveStrengthState, type ModelOption } from './model-selection'
 import { SessionSettingsMenu, describeSessionModel } from './session-settings'
 import { PresetPanel } from './preset-panel'
@@ -532,13 +532,27 @@ function App(): React.ReactElement {
     node.style.height = `${Math.min(node.scrollHeight, 168)}px`
   }, [input])
 
-  const reload = React.useCallback(async (client: WsClient): Promise<SDKMessage[]> => {
+  /**
+   * 重拉权威尾部。`merge` 模式按身份合并而不是整体替换 ——
+   * **流式中的 partial 不落盘**，无脑替换会把正在输出的正文冲掉：回前台（wake，
+   * 桌面切窗口）与 requiresSnapshot 重连（游标落窗外、漏帧不补发）都发生在流式中，
+   * 替换后漏掉的 final 不补发 → 正文消失且不恢复（「除非再发消息或刷新」）。
+   * 合并后 JSONL 的 final 按身份覆盖同身份 partial（upsert 有方向保护），
+   * 落盘的 final 能恢复，流式中的消息保留在原位。
+   * 首屏与 run_completed 后的重拉用 replace：那两种场景没有在飞的消息，
+   * 且 replace 能正确反映服务端删除/截断（rewind）。
+   */
+  const reload = React.useCallback(async (client: WsClient, mode: 'replace' | 'merge' = 'replace'): Promise<SDKMessage[]> => {
     try {
       // 只取尾部：多留 TAIL_HEADROOM 条余量，跑完一轮新消息落进来时窗口不会立刻往前滑动。
       const page = decodeMessagePage(
         await client.getSdkMessages(sessionId, { targetMessages: tailPageSize(heldRef.current) }),
       )
-      setMessages(page.messages)
+      if (mode === 'merge') {
+        setMessages((previous) => mergeReloadPage(previous, page.messages))
+      } else {
+        setMessages(page.messages)
+      }
       setPageStart(page.startIndex)
       setHasOlder(page.hasMore)
       setNotice((previous) => previous.startsWith('读取会话失败') ? '' : previous)
@@ -791,7 +805,8 @@ function App(): React.ReactElement {
       // 但重放里的 assistant 消息可能先把 running 顶回 true，顺手校准一次不亏。
       onAgentResumeStatus: (status) => {
         if (status.requiresSnapshot) {
-          void reload(client).then(calibrateRunning)
+          // merge：漏帧不补发，但 final 落盘了就能从页面恢复；在飞的 partial 也保留
+          void reload(client, 'merge').then(calibrateRunning)
           return
         }
         calibrateRunning(messagesRef.current)
@@ -906,7 +921,8 @@ function App(): React.ReactElement {
     const wake = (): void => {
       if (document.visibilityState !== 'visible') return
       client.reconnectNow()
-      void reload(client).then(calibrateRunning)
+      // merge：切窗口可能切在流式中，替换会把在飞的正文冲掉且不恢复
+      void reload(client, 'merge').then(calibrateRunning)
     }
     document.addEventListener('visibilitychange', wake)
     window.addEventListener('online', wake)

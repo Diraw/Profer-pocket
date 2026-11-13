@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { SDKMessage } from '@profer/shared'
-import { INITIAL_PAGE, decodeMessagePage, mergePrepend, tailPageSize, upsertMessage } from './message-page'
+import { INITIAL_PAGE, decodeMessagePage, mergePrepend, mergeReloadPage, tailPageSize, upsertMessage } from './message-page'
 
 const message = (uuid: string, text = 'hi'): SDKMessage =>
   ({ uuid, type: 'assistant', message: { role: 'assistant', content: text } } as unknown as SDKMessage)
@@ -151,5 +151,47 @@ describe('实时消息合并：按 _provenance 身份覆盖，partial 不成残�
     let list = upsertMessage([], finalFrame('hi'))
     list = upsertMessage(list, finalFrame('hi'))
     expect(list).toHaveLength(1)
+  })
+})
+
+describe('重拉页面合并：流式中的消息不被冲掉', () => {
+  test('Given 在飞的 partial（不在 JSONL）When 合并页面 Then 原样保留', () => {
+    const live = [partialFrame('正在输出', { messageId: 'm-live' })]
+    const page = [finalFrame('旧回复', 'u-old', 'm-old')]
+    const merged = mergeReloadPage(live, page)
+    expect(merged).toHaveLength(2)
+    expect(merged[0]).toBe(live[0])
+  })
+
+  test('Given 页面带回同身份 final（漏帧后落盘）When 合并 Then final 覆盖 partial', () => {
+    const live = [partialFrame('正在输出', { messageId: 'm' })]
+    const page = [finalFrame('完整回复', 'u', 'm')]
+    const merged = mergeReloadPage(live, page)
+    expect(merged).toHaveLength(1)
+    expect((merged[0] as { message: { content: Array<{ text: string }> } }).message.content[0].text).toBe('完整回复')
+  })
+
+  test('Given 页面有新消息 When 合并 Then 按顺序追加尾部且不重复', () => {
+    const current = [finalFrame('a', 'ua', 'ma')]
+    const page = [finalFrame('a', 'ua', 'ma'), finalFrame('b', 'ub', 'mb')]
+    const merged = mergeReloadPage(current, page)
+    expect(merged).toHaveLength(2)
+    expect((merged[1] as { message: { content: Array<{ text: string }> } }).message.content[0].text).toBe('b')
+  })
+
+  test('Given 已有 final、页面里同身份 partial 还在飞 When 合并 Then 保留 final 不倒退', () => {
+    const current = [finalFrame('完整回复', 'u', 'm')]
+    const page = [partialFrame('完整回', { messageId: 'm' })]
+    const merged = mergeReloadPage(current, page)
+    expect(merged).toHaveLength(1)
+    expect((merged[0] as { message: { content: Array<{ text: string }> } }).message.content[0].text).toBe('完整回复')
+  })
+
+  test('Given 前置加载过更早消息 When 合并页面 Then 更早消息保留在原位', () => {
+    const current = [message('u-older', '更早'), finalFrame('a', 'ua', 'ma')]
+    const page = [finalFrame('a', 'ua', 'ma'), finalFrame('b', 'ub', 'mb')]
+    const merged = mergeReloadPage(current, page)
+    expect(merged).toHaveLength(3)
+    expect(merged[0]).toBe(current[0])
   })
 })
