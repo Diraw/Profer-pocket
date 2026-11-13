@@ -59,6 +59,14 @@
   --sp-8: 32px;
 
   --max-width: 900px;
+  /**
+   * 页面水平留白。断点只改这一个变量，各容器不必各写一遍 ——
+   * 做宽度适配时最容易漏的就是某个容器还硬编码着 16，结果一档宽一档窄。
+   */
+  --gutter: var(--sp-4);
+  /* 横屏时刘海在侧边：留白取「设计值」与安全区的较大者，内容不会被遮住 */
+  --gutter-left: max(var(--gutter), env(safe-area-inset-left, 0px));
+  --gutter-right: max(var(--gutter), env(safe-area-inset-right, 0px));
   /* 浮层投影：深色下极轻，主要靠色阶分层 */
   --float-shadow: 0 1px 2px rgba(0, 0, 0, .28), 0 8px 24px rgba(0, 0, 0, .18);
 }
@@ -100,7 +108,7 @@ body {
   align-items: center;
   gap: var(--sp-2);
   min-height: 64px;
-  padding: var(--sp-3) var(--sp-4);
+  padding: var(--sp-3) var(--gutter-right) var(--sp-3) var(--gutter-left);
 }
 
 /* 聊天标题：与输入条、圆键同一材质（lowest + 细边线 + 轻投影） */
@@ -206,7 +214,7 @@ body {
 
 /* ===== 提示条 ===== */
 .notice {
-  margin: 0 var(--sp-4) var(--sp-2);
+  margin: 0 var(--gutter-right) var(--sp-2) var(--gutter-left);
   padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--warning-container);
   border-radius: var(--r-sm);
@@ -221,7 +229,7 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--sp-4) var(--sp-4) var(--sp-6);
+  padding: var(--sp-4) var(--gutter-right) var(--sp-6) var(--gutter-left);
   /* 不设 scroll-behavior: smooth —— 流式输出时每帧重置平滑动画会明显拖影，
      平滑只用在「回到最新」按钮上（scrollTo({behavior:'smooth'})）。 */
   overscroll-behavior: contain;
@@ -407,7 +415,7 @@ body {
 
 /* ===== 输入区：56px 胶囊 + 40px 圆键（圆角 28 = 键半径 20 + 8） ===== */
 .composer {
-  padding: var(--sp-2) var(--sp-4) var(--sp-4);
+  padding: var(--sp-2) var(--gutter-right) var(--sp-4) var(--gutter-left);
   padding-bottom: max(var(--sp-4), env(safe-area-inset-bottom));
 }
 .composer-pill {
@@ -426,7 +434,10 @@ body {
 .composer-pill textarea {
   flex: 1;
   min-height: 40px;
+  /* 矮屏（横屏手机、半屏窗口）不能让输入框把消息区顶没：上限跟随视口高度。
+     先给不认 dvh 的老浏览器一个固定值，认得的会覆盖掉这一行。 */
   max-height: 168px;
+  max-height: min(168px, 30dvh);
   padding: 9px var(--sp-2);
   border: 0;
   background: transparent;
@@ -855,7 +866,7 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 .viz-fallback { margin: var(--sp-2) 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.55; }
 
 /* ===== 阻塞交互：审批 / 提问 / 计划 ===== */
-.interactions { padding: 0 var(--sp-4) var(--sp-2); }
+.interactions { padding: 0 var(--gutter-right) var(--sp-2) var(--gutter-left); }
 .icard {
   padding: var(--sp-4);
   border: 1px solid var(--hairline);
@@ -954,7 +965,7 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 
 /* ===== Goal 状态条 ===== */
 .goal-bar {
-  margin: 0 var(--sp-4) var(--sp-2);
+  margin: 0 var(--gutter-right) var(--sp-2) var(--gutter-left);
   padding: var(--sp-3) var(--sp-4);
   border: 1px solid var(--hairline);
   border-radius: var(--r-md);
@@ -1005,7 +1016,7 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
   /* 收起态只是一颗贴左的小按钮，不要拉成整行虚线框（那会变成页面上最响的元素） */
   display: inline-flex;
   align-self: flex-start;
-  margin: 0 var(--sp-4) var(--sp-2);
+  margin: 0 var(--gutter-right) var(--sp-2) var(--gutter-left);
   padding: 5px 12px;
   border-style: dashed;
   background: transparent;
@@ -1014,7 +1025,7 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 }
 .goal-new:hover { color: var(--ink); border-color: var(--outline); }
 .goal-launcher {
-  margin: 0 var(--sp-4) var(--sp-2);
+  margin: 0 var(--gutter-right) var(--sp-2) var(--gutter-left);
   padding: var(--sp-3);
   border: 1px solid var(--hairline);
   border-radius: var(--r-md);
@@ -1037,21 +1048,78 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 .goal-launcher-row .hint { flex: 1; color: #7d7a75; font-size: 11px; }
 .goal-launcher-row button { padding: 5px 12px; font-size: 12px; }
 
-/* ===== 窄屏：页面水平留白收到 12，顶栏 56 ===== */
+/* ===== 窄屏：留白收到 12，顶栏 56 ===== */
 @media (max-width: 560px) {
-  .topbar { min-height: 56px; padding: 10px 12px; grid-template-columns: 36px minmax(0, 1fr) auto; }
+  :root { --gutter: 12px; }
+  .topbar { min-height: 56px; padding: 10px var(--gutter-right) 10px var(--gutter-left); grid-template-columns: 36px minmax(0, 1fr) auto; }
   .icon-btn { width: 36px; height: 36px; }
   .conn span.label { display: none; }
   .body { font-size: 14.5px; line-height: 1.6; }
   .body ul, .body ol { padding-left: 20px; }
-  .notice, .goal-bar, .goal-new, .goal-launcher, .interactions { margin-left: 12px; margin-right: 12px; }
-  .stream { padding: 12px 12px var(--sp-6); }
-  .composer { padding-left: 12px; padding-right: 12px; }
   .turn { margin-bottom: var(--sp-4); }
   .turn.user .body { max-width: 90%; }
   .body pre { padding: 10px; }
   /* 窄屏上摘要更容易被名称挤没，把名称一侧让出宽度 */
   .prow-title { max-width: 46%; }
+}
+
+/* ===== 小屏（iPhone SE / 分屏极窄）：再收一档，正文降半号 ===== */
+@media (max-width: 380px) {
+  :root { --gutter: 10px; }
+  .body { font-size: 14px; }
+  .turn.user .body { max-width: 94%; }
+  .prow-title { max-width: 42%; }
+  .composer-pill { gap: 6px; padding: 6px; }
+}
+
+/* ===== 平板竖屏 / 半屏窗口：全宽但气泡不再顶到边 ===== */
+@media (min-width: 561px) and (max-width: 899px) {
+  :root { --gutter: 20px; }
+  .turn.user .body { max-width: 78%; }
+}
+
+/* ===== 桌面：居中列 + 更松的留白；列边缘给一条 hairline，宽屏才不会「糊成一整块」 ===== */
+@media (min-width: 900px) {
+  :root {
+    --gutter: 24px;
+    --max-width: 880px;
+  }
+  body { font-size: 15.5px; }
+  .body { font-size: 15.5px; line-height: 1.66; }
+  .app {
+    box-shadow: 0 0 0 1px var(--hairline), 0 24px 64px rgba(0, 0, 0, .28);
+  }
+  .turn.user .body { max-width: 74%; }
+  .empty-desc { max-width: 420px; font-size: 13.5px; }
+}
+
+/* 鼠标设备才给图片加微缩放；触屏 tap 后 :hover 会「粘」在图上 */
+@media (min-width: 900px) and (hover: hover) {
+  .turn-image-open { transition: transform .16s ease; }
+  .turn-image-open:hover { transform: scale(1.006); }
+}
+
+/* ===== 超宽屏：列宽再放一点、字号上一档，避免大屏上字显得碎 ===== */
+@media (min-width: 1440px) {
+  :root {
+    --gutter: 32px;
+    --max-width: 940px;
+  }
+  body { font-size: 16px; }
+  .body { font-size: 16px; line-height: 1.7; }
+  .turn.user .body { max-width: 70%; }
+}
+
+/* ===== 矮屏（横屏手机 / 半屏窗口）：先把顶栏和输入区的固定高度让出来 ===== */
+@media (max-height: 580px) {
+  .topbar { min-height: 48px; padding-top: 6px; padding-bottom: 6px; }
+  .stream { padding-top: 8px; }
+  .composer { padding-top: 4px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+  .composer-pill { min-height: 48px; padding: 6px; }
+  .composer-pill textarea { min-height: 36px; max-height: min(120px, 34dvh); padding-top: 7px; padding-bottom: 7px; }
+  .empty-chips { display: none; }
+  .empty { margin-top: 7vh; }
+  .turn { margin-bottom: var(--sp-4); }
 }
 
 @media (prefers-reduced-motion: reduce) {
