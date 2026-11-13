@@ -5,6 +5,7 @@ import {
   describeUsageDetail,
   formatClock,
   formatTokens,
+  resolveTurnModel,
   resolveTurnSource,
   resolveTurnTime,
   sumTurnUsage,
@@ -140,6 +141,19 @@ describe('时间与格式', () => {
 
   test('Given 助手回合 When 取时间 Then 用分组创建时间', () => {
     expect(resolveTurnTime(assistantTurn([{ input: 1, output: 1 }], 1794558596454))).toBe(1794558596454)
+  })
+
+  test('Given 助手回合带模型 When 取名 Then 返回模型标识（用户回合没有）', () => {
+    const group = assistantTurn([{ input: 1, output: 1 }]) as never as { model?: string }
+    group.model = 'claude-sonnet-4-5'
+    expect(resolveTurnModel(group as never)).toBe('claude-sonnet-4-5')
+    expect(resolveTurnModel(userTurn({ at: 1 }))).toBeUndefined()
+  })
+
+  test('Given 模型字段为空 When 取名 Then undefined（界面不渲染空 tag）', () => {
+    const group = assistantTurn([{ input: 1, output: 1 }]) as never as { model?: string }
+    group.model = '   '
+    expect(resolveTurnModel(group as never)).toBeUndefined()
   })
 
   test('Given 各种量级 When 格式化 token Then 千位以下直出、上万折 k', () => {

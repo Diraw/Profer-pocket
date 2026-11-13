@@ -22,11 +22,14 @@ import {
   describeUsage,
   describeUsageDetail,
   formatClock,
+  resolveTurnModel,
   resolveTurnSource,
   resolveTurnTime,
   sumTurnUsage,
 } from './turn-meta'
 import { OLDER_PAGE, decodeMessagePage, mergePrepend, tailPageSize } from './message-page'
+import { FOLLOW_DEFAULT, modelLabelFor, normalizeChannelModels, resolveStrengthState, type ModelOption } from './model-selection'
+import { SessionSettingsMenu, describeSessionModel } from './session-settings'
 import { applyPageTitle } from './page-title'
 import { base64FromDataUrl, formatBytes, resolveSendText, validateAttachmentFile } from './attachments'
 import { GoalBar, GoalLauncher, normalizeGoal, type GoalAction, type GoalState } from './goal'
@@ -61,6 +64,27 @@ interface SessionMeta {
   modelId?: string
   workspaceId?: string
   permissionMode?: SendPermissionMode
+  /** 内核决定用哪套推理档位：claude → effort，pi → 模型自带 levels */
+  agentRuntime?: string
+  /** 会话级强度覆盖；null/缺省表示跟随预设 */
+  agentEffort?: string | null
+  openAIThinkingLevel?: string | null
+}
+
+/**
+ * `list_channels` 的渠道条目。
+ *
+ * 只声明用得上的字段：模型表交给 `normalizeChannelModels` 自己校验，
+ * 客户端不在这里二次建模 —— 免得服务端加字段时这里先坏。
+ */
+interface RemoteChannel {
+  id: string
+  name?: string
+  provider?: string
+  baseUrl?: string
+  enabled?: boolean
+  agentRuntimes?: string[]
+  models?: unknown[]
 }
 
 /**
@@ -202,6 +226,12 @@ function App(): React.ReactElement {
   const [attachments, setAttachments] = React.useState<StagedAttachment[]>([])
   const [modeMenuOpen, setModeMenuOpen] = React.useState(false)
   const [switchingMode, setSwitchingMode] = React.useState(false)
+  /** 模型 + 强度菜单；数据来自 list_channels（模型表）与 session_detail（当前选择） */
+  const [settingsMenuOpen, setSettingsMenuOpen] = React.useState(false)
+  const [channels, setChannels] = React.useState<RemoteChannel[] | null>(null)
+  /** Pi 内核下模型自带的推理档位；Claude 内核为 null（走 effort 四档） */
+  const [reasoningLevels, setReasoningLevels] = React.useState<string[] | null>(null)
+  const [switchingModel, setSwitchingModel] = React.useState(false)
   const clientRef = React.useRef<WsClient | null>(null)
   const scrollRef = React.useRef<HTMLDivElement | null>(null)
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null)
@@ -243,22 +273,39 @@ function App(): React.ReactElement {
     return false
   }, [groups])
   const sessionActive = running && !lastTurnFinished
+  /** 内核决定用哪套推理档位；缺省按 claude 处理（历史会话与旧服务端都是这个默认） */
+  const agentRuntime = meta?.agentRuntime ?? 'claude'
+  /** 当前内核可切的模型（过滤规则与服务端 update_session_model 同一份） */
+  const models = React.useMemo(
+    () => normalizeChannelModels(channels, agentRuntime),
+    [channels, agentRuntime],
+  )
+  const strength = React.useMemo(
+    () => resolveStrengthState({
+      levels: reasoningLevels,
+      level: meta?.openAIThinkingLevel,
+      effort: meta?.agentEffort,
+    }),
+    [reasoningLevels, meta?.openAIThinkingLevel, meta?.agentEffort],
+  )
   /**
-   * 每轮的「时间 / 来源 / token」。
+   * 每轮的「模型 / 时间 / 来源 / token」。
    *
-   * 一起算进同一个 memo：三者都只依赖分组，拆成三个 memo 只会让每帧多跑两遍 map。
-   * 时钟字符串在这里定稿（`Date.now()` 只在重算时取一次），避免每条消息各算各的。
+   * 一起算进同一个 memo：它们都只依赖分组（模型名再多一个 models 依赖），
+   * 拆成几个 memo 只会让每帧多跑几遍 map。时钟字符串在这里定稿
+   * （`Date.now()` 只在重算时取一次），避免每条消息各算各的。
    */
   const turnMetas = React.useMemo(() => groups.map((group) => {
     const usage = sumTurnUsage(group)
     const source = resolveTurnSource(group)
     return {
+      model: modelLabelFor(resolveTurnModel(group), models),
       clock: formatClock(resolveTurnTime(group)),
       sourceLabel: source ? SOURCE_LABELS[source] : '',
       usageText: usage ? describeUsage(usage) : '',
       usageDetail: usage ? describeUsageDetail(usage) : '',
     }
-  }), [groups])
+  }), [groups, models])
   const hasPending = permissions.length + askUsers.length + exitPlans.length > 0
   /** 提议不阻塞运行，所以只影响「是否渲染卡片区」，不锁输入框。 */
   const hasCards = hasPending || goalProposals.length > 0
@@ -463,11 +510,55 @@ function App(): React.ReactElement {
         modelId: typeof raw.modelId === 'string' ? raw.modelId : undefined,
         workspaceId: typeof raw.workspaceId === 'string' ? raw.workspaceId : undefined,
         permissionMode: normalizePermissionMode(raw.permissionMode),
+        agentRuntime: typeof raw.agentRuntime === 'string' ? raw.agentRuntime : undefined,
+        agentEffort: typeof raw.agentEffort === 'string' ? raw.agentEffort : null,
+        openAIThinkingLevel: typeof raw.openAIThinkingLevel === 'string' ? raw.openAIThinkingLevel : null,
       })
     } catch (error) {
       setNotice(`读取会话信息失败：${error instanceof Error ? error.message : String(error)}`)
     }
   }, [sessionId])
+
+  /**
+   * 模型表：会话内可切换的模型集合，连接建立时取一次。
+   *
+   * 失败只降级、不打断：旧服务端没有这条命令时，菜单退化成「只有强度」，
+   * 聊天本身不受影响 —— 模型标签则回退成「美化后的 id」。
+   */
+  const loadChannels = React.useCallback(async (client: WsClient): Promise<void> => {
+    try {
+      const data = await client.listChannels()
+      setChannels(Array.isArray(data) ? data as RemoteChannel[] : null)
+    } catch {
+      setChannels(null)
+    }
+  }, [])
+
+  /**
+   * Pi 内核的模型自带推理档位（off/minimal/low/…/max），Claude 内核只有 effort 四档。
+   * 档位由服务端解析（renderer 没有 pi-ai 目录，本地推不出来），所以这里问一次并缓存。
+   */
+  React.useEffect(() => {
+    const client = clientRef.current
+    setReasoningLevels(null)
+    if (!client || agentRuntime !== 'pi' || !meta?.modelId) return
+    const channel = channels?.find((item) => item.id === meta.channelId)
+    if (!channel?.provider) return
+    let cancelled = false
+    void client.getPiReasoningCapability(channel.provider, meta.modelId, channel.baseUrl)
+      .then((capability) => {
+        if (cancelled) return
+        const levels = (capability as { levels?: unknown } | null)?.levels
+        setReasoningLevels(Array.isArray(levels)
+          ? levels.filter((level): level is string => typeof level === 'string' && level.length > 0)
+          : null)
+      })
+      .catch(() => {
+        // 拿不到能力表就按 Claude 的 effort 档兜底，不给用户一排选不中的选项
+        if (!cancelled) setReasoningLevels(null)
+      })
+    return () => { cancelled = true }
+  }, [agentRuntime, meta?.modelId, meta?.channelId, channels])
 
   React.useEffect(() => {
     if (!sessionId || !token) {
@@ -608,6 +699,7 @@ function App(): React.ReactElement {
       }
       // 会话信息失败不该拦住消息读取：loadSessionMeta 自己吞掉异常，只留一条 notice
       await loadSessionMeta(client)
+      await loadChannels(client)
       await reload(client)
       await loadInteractions(client)
       await loadGoal(client)
@@ -878,6 +970,48 @@ function App(): React.ReactElement {
     }
   }
 
+  /**
+   * 切换模型。服务端会同时更新全局默认（下次新建会话继承），所以这里不用自己记。
+   * 成功后重取会话详情：`modelId`、`channelId` 与能力档位都跟着变。
+   */
+  const pickModel = async (option: ModelOption): Promise<void> => {
+    const client = clientRef.current
+    if (!client || switchingModel) return
+    if (option.modelId === meta?.modelId && option.channelId === meta?.channelId) {
+      setSettingsMenuOpen(false)
+      return
+    }
+    setSwitchingModel(true)
+    try {
+      await client.updateSessionModel(sessionId, option.channelId, option.modelId)
+      await loadSessionMeta(client)
+      setSettingsMenuOpen(false)
+      setNotice(`已切换到 ${option.name}`)
+    } catch (error) {
+      setNotice(`切换模型失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setSwitchingModel(false)
+    }
+  }
+
+  /** 切换推理强度；`FOLLOW_DEFAULT` 翻译成 null = 清除会话覆盖。菜单不关，方便连着调。 */
+  const pickStrength = async (value: string): Promise<void> => {
+    const client = clientRef.current
+    if (!client || switchingModel) return
+    if (value === strength.value) return
+    const level = value === FOLLOW_DEFAULT ? null : value
+    setSwitchingModel(true)
+    try {
+      if (strength.kind === 'thinking') await client.updateSessionThinkingLevel(sessionId, level)
+      else await client.updateSessionAgentEffort(sessionId, level)
+      await loadSessionMeta(client)
+    } catch (error) {
+      setNotice(`切换强度失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setSwitchingModel(false)
+    }
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -892,6 +1026,17 @@ function App(): React.ReactElement {
         </button>
         <div className="title-pill" title={meta?.title || sessionId}>
           <span className="title-text">{meta?.title || 'Profer 会话'}</span>
+          {/* 模型与强度聚在标题下：会话的「它是什么」比标题本身还常被查 */}
+          <button
+            className="model-chip"
+            onClick={() => setSettingsMenuOpen((previous) => !previous)}
+            aria-expanded={settingsMenuOpen}
+            aria-haspopup="menu"
+            disabled={!meta}
+            title="切换模型与推理强度"
+          >
+            {describeSessionModel(meta?.modelId, models, strength)}
+          </button>
         </div>
         <div className="conn" title={connection}>
           <span className={`conn-dot ${connected ? 'ok' : notice ? 'bad' : 'wait'}`} />
@@ -920,6 +1065,18 @@ function App(): React.ReactElement {
             ))}
           </div>
         </>
+      )}
+      {settingsMenuOpen && (
+        <SessionSettingsMenu
+          models={models}
+          currentModelId={meta?.modelId}
+          strength={strength}
+          running={sessionActive}
+          busy={switchingModel}
+          onPickModel={(option) => void pickModel(option)}
+          onPickStrength={(value) => void pickStrength(value)}
+          onClose={() => setSettingsMenuOpen(false)}
+        />
       )}
       {goal
         ? <GoalBar goal={goal} busy={acting} onAction={(action) => void runGoalAction(action)} />
@@ -979,7 +1136,8 @@ function App(): React.ReactElement {
             // 所以再叠一道数据判据，跑完的轮次一律收起，正文才能露出来。
             const live = sessionActive && turn.index === turns.length - 1
             const turnMeta = turnMetas[turn.index]
-            const hasMeta = Boolean(turnMeta && (turnMeta.clock || turnMeta.sourceLabel || turnMeta.usageText))
+            const hasMeta = Boolean(turnMeta
+              && (turnMeta.model || turnMeta.clock || turnMeta.sourceLabel || turnMeta.usageText))
             return (
               <div className={`turn ${turn.role === 'user' ? 'user' : 'assistant'}`} key={turn.index}>
                 {isAssistant && timeline && <TurnProcess timeline={timeline} live={live} />}
@@ -993,6 +1151,7 @@ function App(): React.ReactElement {
                 {/* 来源与时间：只对「谁发的」有意义，助手回合省掉来源标签 */}
                 {hasMeta && turnMeta && (
                   <div className="turn-meta">
+                    {turnMeta.model && <span className="tm-model">{turnMeta.model}</span>}
                     {turnMeta.sourceLabel && <span className="tm-src">{turnMeta.sourceLabel}</span>}
                     {turnMeta.clock && <span className="tm-clock">{turnMeta.clock}</span>}
                     {turnMeta.usageText && (

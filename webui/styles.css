@@ -113,6 +113,10 @@ body {
 
 /* 聊天标题：与输入条、圆键同一材质（lowest + 细边线 + 轻投影） */
 .title-pill {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
   min-width: 0;
   padding: 6px var(--sp-4);
   border: 1px solid var(--hairline);
@@ -121,6 +125,28 @@ body {
   box-shadow: var(--float-shadow);
   text-align: center;
 }
+/* 模型 + 强度：放在标题下面一行。会话「是什么模型」比标题更常被查，又不该另占一行工具栏 */
+.model-chip {
+  max-width: 100%;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.model-chip::after {
+  content: '▾';
+  margin-left: 4px;
+  font-size: 9px;
+  opacity: .6;
+}
+.model-chip:hover:not(:disabled) { color: var(--ink); }
+.model-chip:disabled { opacity: .55; }
 .title-text {
   display: block;
   overflow: hidden;
@@ -194,6 +220,37 @@ body {
   background: var(--surface-lowest);
   box-shadow: var(--float-shadow);
 }
+
+/* 模型菜单更宽也更高：模型名 + 倍率信息一行放不下 248，长列表还得能滚。
+   居中于标题胶囊下方 —— 触发点就在那儿，贴着才像从它展开。 */
+.menu.wide {
+  top: 68px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(320px, calc(100% - 2 * var(--gutter)));
+  max-height: min(72vh, 540px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.menu-label {
+  padding: 6px 10px 2px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: .02em;
+}
+/* 多渠道时的小组标题，比 label 再弱一档 */
+.menu-group {
+  padding: 6px 10px 2px;
+  color: #7d7a75;
+  font-size: 10.5px;
+}
+.menu-sep { height: 1px; margin: 6px 4px; background: var(--hairline); }
+.menu-note {
+  padding: 4px 10px 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
 .menu-item {
   display: flex;
   align-items: center;
@@ -205,8 +262,7 @@ body {
   background: transparent;
   text-align: left;
 }
-.menu-item:hover:not(:disabled) { background: var(--surface-low); }
-.menu-item.active { background: var(--surface); }
+.menu-item:hover:not(:disabled) { background: var(--surface-low); }.menu-item.active { background: var(--surface); }
 .menu-item-text { display: flex; flex: 1; flex-direction: column; gap: 1px; min-width: 0; }
 .menu-item-label { font-size: 13px; color: var(--ink); }
 .menu-item-hint { color: var(--muted); font-size: 11px; line-height: 1.45; }
@@ -268,6 +324,16 @@ body {
 /* 用低对比度圆点分隔，比竖线更轻 */
 .turn-meta > * + *::before { content: '·'; margin-right: 6px; opacity: .5; }
 .tm-src { color: var(--primary); }
+/* 模型名可能很长（带版本号），给别的信息留位置，超了自己省略 */
+.tm-model {
+  max-width: 46%;
+  overflow: hidden;
+  color: var(--ink);
+  font-weight: 500;
+  opacity: .72;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .tm-usage { letter-spacing: .2px; }
 
 .body { min-width: 0; font-size: 15px; line-height: 1.62; overflow-wrap: anywhere; }

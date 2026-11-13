@@ -114,6 +114,13 @@ export function resolveTurnSource(group: MessageGroup | undefined): TurnSource |
   return null
 }
 
+/** 这一轮用的是哪个模型（只有助手回合有）。用于在回合末尾标模型 tag。 */
+export function resolveTurnModel(group: MessageGroup | undefined): string | undefined {
+  if (!group || group.type !== 'assistant-turn') return undefined
+  const model = (group as { model?: unknown }).model
+  return typeof model === 'string' && model.trim() ? model.trim() : undefined
+}
+
 /** 这一轮的时间戳（毫秒）；拿不到返回 undefined。 */
 export function resolveTurnTime(group: MessageGroup | undefined): number | undefined {
   if (!group) return undefined
