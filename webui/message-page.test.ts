@@ -135,6 +135,18 @@ describe('实时消息合并：按 _provenance 身份覆盖，partial 不成残�
     expect(list).toHaveLength(3)
   })
 
+  test('Given 已有 final、同身份 partial 还在飞（回前台重拉后的反序）When 合并 Then 保留 final 不让内容倒退', () => {
+    const list = upsertMessage([finalFrame('完整正文')], partialFrame('完整正'))
+    expect(list).toHaveLength(1)
+    expect((list[0] as { message: { content: Array<{ text: string }> } }).message.content[0].text).toBe('完整正文')
+  })
+
+  test('Given 已有 partial、同身份 final 到达 When 合并 Then 终稿覆盖增量', () => {
+    const list = upsertMessage([partialFrame('完整正')], finalFrame('完整正文'))
+    expect(list).toHaveLength(1)
+    expect((list[0] as { message: { content: Array<{ text: string }> } }).message.content[0].text).toBe('完整正文')
+  })
+
   test('Given 同身份 final 重复到达（重连重放）When 合并 Then 保持一条', () => {
     let list = upsertMessage([], finalFrame('hi'))
     list = upsertMessage(list, finalFrame('hi'))

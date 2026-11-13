@@ -95,12 +95,23 @@ export function messageIdentity(message: SDKMessage): string | undefined {
   return undefined
 }
 
-/** 流式期间同一回合会落多行快照；按身份覆盖而不是追加，避免重复气泡与残条。 */
+/**
+ * 流式期间同一回合会落多行快照；按身份覆盖而不是追加，避免重复气泡与残条。
+ *
+ * 方向保护：`partial` 不覆盖已有的 `final`。正常时序是 partial 先、final 后
+ * （终稿覆盖增量）；但回前台重拉（wake reload / requiresSnapshot reload）会先把
+ * JSONL 里的 final 放进列表，而这一轮的 partial 帧可能还在飞 —— 不拦这一步会让
+ * 已完整的正文被更旧的增量顶掉、内容倒退，直到下一条终稿才恢复。
+ */
 export function upsertMessage(list: SDKMessage[], incoming: SDKMessage): SDKMessage[] {
   const identity = messageIdentity(incoming)
   if (identity) {
     const index = list.findIndex((item) => messageIdentity(item) === identity)
-    if (index >= 0) {
+    const existing = index >= 0 ? list[index] : undefined
+    if (existing) {
+      const incomingPartial = (incoming as { _partial?: unknown })._partial === true
+      const existingPartial = (existing as { _partial?: unknown })._partial === true
+      if (incomingPartial && !existingPartial) return list
       const next = list.slice()
       next[index] = incoming
       return next
