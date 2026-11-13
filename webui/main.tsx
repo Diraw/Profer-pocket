@@ -15,6 +15,7 @@ import remarkGfm from 'remark-gfm'
 import type { SDKMessage } from '@profer/shared'
 import { groupIntoTurns, toTranscript } from '@profer/session-core'
 import { TurnExtras, extractTurnExtras, stripContextBlocks, type ImageLoadResult } from './turn-extras'
+import { OLDER_PAGE, decodeMessagePage, mergePrepend, tailPageSize } from './message-page'
 import { GoalBar, GoalLauncher, normalizeGoal, type GoalAction, type GoalState } from './goal'
 import { WsClient, defaultWsUrl } from '../src/renderer/pocket/ws-client'
 import {
@@ -22,12 +23,14 @@ import {
   decodeInteractions,
   normalizeAskUserItems,
   normalizeExitPlanItems,
+  normalizeGoalProposals,
   normalizePermissionItems,
   normalizePermissionMode,
   type AskUserItem,
   type SendPermissionMode,
   type ExitPlanAction,
   type ExitPlanItem,
+  type GoalProposalItem,
   type InteractionHandlers,
   type PermissionItem,
 } from './interactions'
@@ -57,6 +60,14 @@ console.info('[profer-webui] build', __WEBUI_BUILD__)
 /** 空态快捷入口：只填进输入框，不直接发出去，避免误触消耗一轮。 */
 const QUICK_PROMPTS = ['总结一下当前进度', '接下来该做什么', '解释一下刚才的改动']
 
+/**
+ * 触屏设备上没有 Shift 键：若 Enter 仍当发送，就永远没办法在消息里换行。
+ * 按指针类型分流 —— 粗指针（手机/平板）Enter 换行、统一用圆键发送；
+ * 细指针（桌面浏览器）保持 Enter 发送的老习惯。
+ */
+const PREFER_SEND_BUTTON = typeof window.matchMedia === 'function'
+  && window.matchMedia('(pointer: coarse)').matches
+
 const boot = window.__PROFER_WEBUI_BOOT__
 const query = new URLSearchParams(window.location.search)
 const pathMatch = window.location.pathname.match(/^\/s\/([^/]+)/)
@@ -70,17 +81,6 @@ if (query.has('token')) {
   const clean = new URL(window.location.href)
   clean.searchParams.delete('token')
   window.history.replaceState(null, '', clean.pathname + clean.search)
-}
-
-/** 兼容服务端返回裸数组 / 分页结构 / 外层 result 三种形态。 */
-function decodeMessages(raw: unknown): SDKMessage[] {
-  const value = raw as { messages?: unknown; data?: unknown } | null
-  if (Array.isArray(raw)) return raw as SDKMessage[]
-  if (Array.isArray(value?.messages)) return value.messages as SDKMessage[]
-  const data = value?.data as { messages?: unknown } | unknown[] | null
-  if (Array.isArray(data)) return data as SDKMessage[]
-  if (Array.isArray(data?.messages)) return (data as { messages: unknown[] }).messages as SDKMessage[]
-  return []
 }
 
 /** 流式期间同一回合会落多行快照；按 uuid 覆盖而不是追加，避免重复气泡。 */
@@ -120,6 +120,7 @@ function App(): React.ReactElement {
   const [permissions, setPermissions] = React.useState<PermissionItem[]>([])
   const [askUsers, setAskUsers] = React.useState<AskUserItem[]>([])
   const [exitPlans, setExitPlans] = React.useState<ExitPlanItem[]>([])
+  const [goalProposals, setGoalProposals] = React.useState<GoalProposalItem[]>([])
   const [goal, setGoal] = React.useState<GoalState | null>(null)
   const [autoApprove, setAutoApprove] = React.useState(() => localStorage.getItem('profer-webui-auto-approve') === '1')
   const clientRef = React.useRef<WsClient | null>(null)
@@ -130,12 +131,33 @@ function App(): React.ReactElement {
   /** 是否贴着底部。用户上滑阅读时不跟随新内容，只露出「回到最新」。 */
   const atBottomRef = React.useRef(true)
   const [jumpVisible, setJumpVisible] = React.useState(false)
+  const [pageStart, setPageStart] = React.useState(0)
+  const [hasOlder, setHasOlder] = React.useState(false)
+  const [loadingOlder, setLoadingOlder] = React.useState(false)
+  /** reload 要按「当前持有多少条」决定取多少尾部，但不能因此把 messages 放进依赖。 */
+  const heldRef = React.useRef(0)
+  /** 前置拼接前记录「距底部距离」，插入后按它还原，否则视口会跳一下。 */
+  const prependAnchorRef = React.useRef<number | null>(null)
 
   // session-core 的纯函数负责快照去重与 turn 分组，避免自己重抄一套口径。
   const groups = React.useMemo(() => groupIntoTurns(messages), [messages])
   const turns = React.useMemo(() => toTranscript(groups), [groups])
   const extras = React.useMemo(() => groups.map(extractTurnExtras), [groups])
   const hasPending = permissions.length + askUsers.length + exitPlans.length > 0
+  /** 提议不阻塞运行，所以只影响「是否渲染卡片区」，不锁输入框。 */
+  const hasCards = hasPending || goalProposals.length > 0
+
+  // 让 reload 读到「当前持有条数」，同时避免把它塞进回调依赖 —— 否则每条消息都会重建连接 effect。
+  React.useEffect(() => { heldRef.current = messages.length }, [messages])
+
+  /** 前置拼接后按距底距离还原滚动位置，否则视口会跳掉一大截。 */
+  React.useLayoutEffect(() => {
+    const anchor = prependAnchorRef.current
+    if (anchor === null) return
+    prependAnchorRef.current = null
+    const node = scrollRef.current
+    if (node) node.scrollTop = node.scrollHeight - anchor
+  }, [messages])
 
   /**
    * 贴底才跟随。用户上滑读历史时不能被新内容拽回底部，只露出一颗「回到最新」。
@@ -172,7 +194,13 @@ function App(): React.ReactElement {
 
   const reload = React.useCallback(async (client: WsClient): Promise<void> => {
     try {
-      setMessages(decodeMessages(await client.getSdkMessages(sessionId)))
+      // 只取尾部：多留 TAIL_HEADROOM 条余量，跑完一轮新消息落进来时窗口不会立刻往前滑动。
+      const page = decodeMessagePage(
+        await client.getSdkMessages(sessionId, { targetMessages: tailPageSize(heldRef.current) }),
+      )
+      setMessages(page.messages)
+      setPageStart(page.startIndex)
+      setHasOlder(page.hasMore)
       setNotice((previous) => previous.startsWith('读取会话失败') ? '' : previous)
     } catch (error) {
       setNotice(`读取会话失败：${error instanceof Error ? error.message : String(error)}`)
@@ -186,6 +214,7 @@ function App(): React.ReactElement {
       setPermissions(next.permissions)
       setAskUsers(next.askUsers)
       setExitPlans(next.exitPlans)
+      setGoalProposals(next.goalProposals)
     } catch {
       // 拉取失败不打断消息读取，事件流与下一轮轮询会补上
     }
@@ -200,6 +229,38 @@ function App(): React.ReactElement {
       // 读取失败不打断会话读取：事件流与下一轮 run 结束都会重新拉取
     }
   }, [sessionId])
+
+  /** 向上续页：只取更早的一页并前置拼接，不重拉尾部。 */
+  const loadOlder = React.useCallback(async (): Promise<void> => {
+    const client = clientRef.current
+    if (!client || loadingOlder || !hasOlder || pageStart <= 0) return
+    const node = scrollRef.current
+    // 记「距底部距离」而不是 scrollTop：插入内容后容器高度变了，scrollTop 会漂。
+    prependAnchorRef.current = node ? node.scrollHeight - node.scrollTop : null
+    setLoadingOlder(true)
+    try {
+      const page = decodeMessagePage(
+        await client.getSdkMessages(sessionId, { before: pageStart, targetMessages: OLDER_PAGE }),
+      )
+      if (page.messages.length === 0) {
+        // 服务端说到头了：收起入口，别让用户对着一个点了没反应的按钮
+        setHasOlder(false)
+        prependAnchorRef.current = null
+        return
+      }
+      setMessages((previous) => mergePrepend(page.messages, previous))
+      setPageStart(page.startIndex)
+      setHasOlder(page.hasMore)
+      // 正在翻历史，不该被新内容拽回底部
+      atBottomRef.current = false
+      setJumpVisible(true)
+    } catch (error) {
+      prependAnchorRef.current = null
+      setNotice(`加载更早消息失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setLoadingOlder(false)
+    }
+  }, [sessionId, loadingOlder, hasOlder, pageStart])
 
   /** 图片不在消息体里：send_local_image 只带 path，经 WS 读取会话工作区内的图片文件。 */
   const loadImage = React.useCallback(async (path: string): Promise<ImageLoadResult> => {
@@ -244,7 +305,15 @@ function App(): React.ReactElement {
         const payload = event.payload as {
           kind?: string
           message?: SDKMessage
-          event?: { type?: string; request?: Record<string, unknown>; requestId?: string; goal?: unknown }
+          event?: {
+            type?: string
+            request?: Record<string, unknown>
+            requestId?: string
+            goal?: unknown
+            proposal?: unknown
+            proposalId?: string
+            mode?: unknown
+          }
         } | null
         if (payload?.kind === 'sdk_message' && payload.message) {
           setMessages((previous) => upsertMessage(previous, payload.message as SDKMessage))
@@ -277,6 +346,21 @@ function App(): React.ReactElement {
           if (item) setExitPlans((previous) => upsertById(previous, item))
         } else if (type === 'exit_plan_mode_resolved') {
           setExitPlans((previous) => previous.filter((item) => item.requestId !== proferEvent?.requestId))
+        } else if (type === 'goal_proposal' && proferEvent?.proposal) {
+          // 提议不阻塞运行：模型提议后这一轮照常跑完，用户批准才由状态机接管后续轮次。
+          const item = normalizeGoalProposals([proferEvent.proposal])[0]
+          if (item) {
+            setGoalProposals((previous) => previous.some((entry) => entry.id === item.id)
+              ? previous.map((entry) => (entry.id === item.id ? item : entry))
+              : [...previous, item])
+          }
+        } else if (type === 'goal_proposal_resolved') {
+          setGoalProposals((previous) => previous.filter((item) => item.id !== proferEvent?.proposalId))
+        } else if (type === 'permission_mode_changed') {
+          // 批准计划时主进程会把会话切出 plan 模式。不同步 meta 的话，
+          // 下一次发送仍带着 permissionMode:'plan' 这个 override，会立刻又进回计划模式。
+          const mode = normalizePermissionMode(proferEvent?.mode)
+          setMeta((previous) => (previous ? { ...previous, permissionMode: mode } : previous))
         }
         // run_completed 与 run_idle 会在同一轮先后到达，3 秒内只收敛一次。
         if (type === 'run_completed' || type === 'run_idle') {
@@ -420,11 +504,35 @@ function App(): React.ReactElement {
     }
   }, [acting, loadGoal, sessionId])
 
+  /**
+   * Goal 提议确认。
+   *
+   * 批准失败时主进程**故意保留**提议（不出队），所以这里不能乐观删卡片：
+   * 只提示失败原因并重拉一次快照，用户可以直接重试。
+   */
+  const respondGoalProposal = React.useCallback(async (proposalId: string, accepted: boolean): Promise<void> => {
+    const client = clientRef.current
+    if (!client || acting) return
+    setActing(true)
+    try {
+      await client.respondGoalProposal(proposalId, accepted)
+      setGoalProposals((previous) => previous.filter((item) => item.id !== proposalId))
+      await loadInteractions(client)
+      await loadGoal(client)
+    } catch (error) {
+      setNotice(`Goal 提议处理失败：${error instanceof Error ? error.message : String(error)}`)
+      await loadInteractions(client)
+    } finally {
+      setActing(false)
+    }
+  }, [acting, loadInteractions, loadGoal])
+
   const interactionHandlers = React.useMemo<InteractionHandlers>(() => ({
     onPermission: (id, behavior, alwaysAllow) => { void respondPermission(id, behavior, alwaysAllow) },
     onAskUser: (id, answers) => { void respondAskUser(id, answers) },
     onExitPlan: (id, action, feedback) => { void respondExitPlan(id, action, feedback) },
-  }), [respondPermission, respondAskUser, respondExitPlan])
+    onGoalProposal: (id, accepted) => { void respondGoalProposal(id, accepted) },
+  }), [respondPermission, respondAskUser, respondExitPlan, respondGoalProposal])
 
   // 网页端「自动批准」兜底：收到权限请求即代为允许并记住本会话，不改动桌面端的会话设置。
   React.useEffect(() => {
@@ -511,6 +619,13 @@ function App(): React.ReactElement {
       {notice && <div className="notice">{notice}</div>}
       <div className="stage">
         <div className="stream" ref={scrollRef} onScroll={handleStreamScroll}>
+          {hasOlder && (
+            <div className="load-older">
+              <button className="load-older-btn" disabled={loadingOlder} onClick={() => void loadOlder()}>
+                {loadingOlder ? '加载中…' : '加载更早的消息'}
+              </button>
+            </div>
+          )}
           {turns.length === 0 ? (
             <div className="empty">
               <div className="empty-title">{connected ? '开始对话' : '正在连接'}</div>
@@ -560,12 +675,13 @@ function App(): React.ReactElement {
           </button>
         )}
       </div>
-      {hasPending && (
+      {hasCards && (
         <div className="interactions">
           <InteractionCards
             permissions={permissions}
             askUsers={askUsers}
             exitPlans={exitPlans}
+            goalProposals={goalProposals}
             busy={acting}
             {...interactionHandlers}
           />
@@ -578,9 +694,14 @@ function App(): React.ReactElement {
             rows={1}
             value={input}
             disabled={hasPending}
-            placeholder={hasPending ? '先处理上方的确认卡片' : '发送消息…（Enter 发送，Shift+Enter 换行）'}
+            placeholder={hasPending
+              ? '先处理上方的确认卡片'
+              : PREFER_SEND_BUTTON ? '发送消息…' : '发送消息…（Enter 发送，Shift+Enter 换行）'}
+            enterKeyHint={PREFER_SEND_BUTTON ? 'enter' : 'send'}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={(event) => {
+              // 触屏上 Enter 留给换行，发送一律走右侧圆键（换行后再按 Enter 也不会误发）。
+              if (PREFER_SEND_BUTTON) return
               if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
               // 中文输入法用 Enter 上屏，此时不能当成发送；isComposing 就是这道闸。
               event.preventDefault()

@@ -44,6 +44,22 @@ export interface ExitPlanItem {
 
 export type ExitPlanAction = 'approve_auto' | 'approve_edit' | 'deny' | 'feedback'
 
+/**
+ * 模型主动提议建立 Goal。
+ *
+ * 与另外三类不同，提议**不阻塞当前轮次**：模型把手上这轮做完就结束了，
+ * 用户批准后才由主进程接管后续轮次。所以它不该把输入框锁住。
+ */
+export interface GoalProposalItem {
+  id: string
+  objective: string
+  rationale?: string
+  verification?: string
+  constraints?: string
+  stopWhen?: string
+  createdAt: number
+}
+
 /** 发消息时透传给服务端的权限模式，取值与 shared 的 PROFER_PERMISSION_MODES 一致。 */
 export type SendPermissionMode = 'auto' | 'plan' | 'bypassPermissions'
 
@@ -51,12 +67,14 @@ export interface InteractionHandlers {
   onPermission: (requestId: string, behavior: 'allow' | 'deny', alwaysAllow?: boolean) => void
   onAskUser: (requestId: string, answers: Record<string, string>) => void
   onExitPlan: (requestId: string, action: ExitPlanAction, feedback?: string) => void
+  onGoalProposal: (proposalId: string, accepted: boolean) => void
 }
 
 interface InteractionCardsProps extends InteractionHandlers {
   permissions: PermissionItem[]
   askUsers: AskUserItem[]
   exitPlans: ExitPlanItem[]
+  goalProposals: GoalProposalItem[]
   busy: boolean
 }
 
@@ -132,6 +150,24 @@ export function normalizeExitPlanItems(raw: unknown): ExitPlanItem[] {
   })
 }
 
+/** 归一化 Goal 提议：objective 为空视为无效（服务端也只在这种情况下不肯入队）。 */
+export function normalizeGoalProposals(raw: unknown): GoalProposalItem[] {
+  return asArray(raw).flatMap((entry) => {
+    if (!isRecord(entry) || typeof entry.id !== 'string') return []
+    const objective = asString(entry.objective)?.trim()
+    if (!entry.id || !objective) return []
+    return [{
+      id: entry.id,
+      objective,
+      rationale: asString(entry.rationale),
+      verification: asString(entry.verification),
+      constraints: asString(entry.constraints),
+      stopWhen: asString(entry.stopWhen),
+      createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : 0,
+    }]
+  })
+}
+
 /**
  * 权限模式只认这三种；缺失或异常时回退 Pocket 默认的「完全自动」。
  * 服务端把该值当作本轮 permissionModeOverride，写死 'auto' 会把「完全自动」降级成每步确认。
@@ -147,12 +183,14 @@ export function decodeInteractions(raw: unknown): {
   permissions: PermissionItem[]
   askUsers: AskUserItem[]
   exitPlans: ExitPlanItem[]
+  goalProposals: GoalProposalItem[]
 } {
   const data = isRecord(raw) ? raw : {}
   return {
     permissions: normalizePermissionItems(data.permissions),
     askUsers: normalizeAskUserItems(data.askUsers),
     exitPlans: normalizeExitPlanItems(data.exitPlans),
+    goalProposals: normalizeGoalProposals(data.goalProposals),
   }
 }
 
@@ -339,9 +377,56 @@ function ExitPlanCard({ item, handlers, busy, extra }: {
   )
 }
 
+function GoalProposalCard({ item, handlers, busy, extra }: {
+  item: GoalProposalItem
+  handlers: InteractionHandlers
+  busy: boolean
+  extra?: string
+}): React.ReactElement {
+  // 契约三段都可缺省：模型只给目标也算有效提议，别为了排版编造字段。
+  const contract = [
+    item.verification ? { key: '验收', value: item.verification } : null,
+    item.constraints ? { key: '约束', value: item.constraints } : null,
+    item.stopWhen ? { key: '停止', value: item.stopWhen } : null,
+  ].filter((row): row is { key: string; value: string } => row !== null)
+
+  return (
+    <div className="icard">
+      <CardHead title="建议转为持续目标" tool="propose_goal" extra={extra} />
+      <div className="icard-body">
+        <p className="icard-text">{item.objective}</p>
+        {item.rationale && <p className="icard-muted">{item.rationale}</p>}
+        {contract.length > 0 && (
+          <div className="icontract">
+            {contract.map((row) => (
+              <div className="icontract-row" key={row.key}>
+                <span className="icontract-key">{row.key}</span>
+                <span className="icontract-val">{row.value}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="icard-muted">
+          批准后 Profer 会以此为长期目标持续多轮执行，可随时在状态条里暂停或停止；
+          忽略也不影响当前这一轮正常跑完。
+        </p>
+      </div>
+      <div className="icard-actions">
+        <span className="icard-hint">不阻塞当前轮次</span>
+        <button className="ibtn ghost" disabled={busy} onClick={() => handlers.onGoalProposal(item.id, false)}>
+          忽略
+        </button>
+        <button className="ibtn primary" disabled={busy} onClick={() => handlers.onGoalProposal(item.id, true)}>
+          开始持续执行
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /** FIFO 展示：一次只显示一张卡片，其余用 (+N) 提示，与桌面端横幅口径一致。 */
-export function InteractionCards({ permissions, askUsers, exitPlans, busy, ...handlers }: InteractionCardsProps): React.ReactElement | null {
-  const total = permissions.length + askUsers.length + exitPlans.length
+export function InteractionCards({ permissions, askUsers, exitPlans, goalProposals, busy, ...handlers }: InteractionCardsProps): React.ReactElement | null {
+  const total = permissions.length + askUsers.length + exitPlans.length + goalProposals.length
   if (total === 0) return null
   const extra = total > 1 ? `(+${total - 1})` : undefined
   const firstPermission = permissions[0]
@@ -350,5 +435,8 @@ export function InteractionCards({ permissions, askUsers, exitPlans, busy, ...ha
   if (firstAskUser) return <AskUserCard item={firstAskUser} handlers={handlers} busy={busy} extra={extra} />
   const firstExitPlan = exitPlans[0]
   if (firstExitPlan) return <ExitPlanCard item={firstExitPlan} handlers={handlers} busy={busy} extra={extra} />
+  // 提议排最后：它不阻塞运行，有真正卡住的东西时不该抢在最前面。
+  const firstProposal = goalProposals[0]
+  if (firstProposal) return <GoalProposalCard item={firstProposal} handlers={handlers} busy={busy} extra={extra} />
   return null
 }

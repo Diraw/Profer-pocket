@@ -99,23 +99,31 @@ export function goalStatusLabel(status: GoalStatus): string {
   return STATUS_LABEL[status]
 }
 
-/** 一屏看全：状态 + 目标 + 轮次 + 最近一轮结论，过长自动省略。 */
+/** 一屏看全：状态 + 目标 + 轮次；详情默认收起，点标题行才展开。 */
 export function GoalBar({ goal, busy, onAction }: {
   goal: GoalState
   busy: boolean
   onAction: (action: GoalAction) => void
 }): React.ReactElement {
+  const [expanded, setExpanded] = React.useState(false)
   const actions = goalActions(goal.status)
   const progress = goal.maxIterations ? `第 ${goal.iteration}/${goal.maxIterations} 轮` : `第 ${goal.iteration} 轮`
   const detail = goal.reasonDetail ?? goal.lastSummary ?? (goal.status === 'completed' ? goal.stopReason : undefined)
   return (
     <div className="goal-bar">
-      <div className="goal-line">
+      {/* 状态条长期占着顶部，详情两行会把消息区压得很矮，所以默认收起 */}
+      <button
+        className="goal-line"
+        onClick={() => setExpanded((previous) => !previous)}
+        aria-expanded={expanded}
+        title={detail ? (expanded ? '收起目标详情' : '展开目标详情') : goal.goal}
+      >
         <span className={`goal-status ${goal.status}`}>{goalStatusLabel(goal.status)}</span>
-        <span className="goal-text" title={goal.goal}>{goal.goal}</span>
+        <span className="goal-text">{goal.goal}</span>
         <span className="goal-meta">{progress}</span>
-      </div>
-      {detail && <div className="goal-detail" title={detail}>{detail}</div>}
+        {detail && <span className={`chev ${expanded ? 'open' : ''}`} aria-hidden="true">›</span>}
+      </button>
+      {expanded && detail && <div className="goal-detail">{detail}</div>}
       <div className="goal-actions">
         {actions.map((action) => (
           <button

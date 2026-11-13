@@ -24,6 +24,7 @@
     "interactions.tsx",
     "turn-extras.tsx",
     "goal.tsx",
+    "message-page.ts",
     "../src/renderer/pocket/ws-client.ts",
     "../src/renderer/pocket/sdk-message-slim.ts"
   ],

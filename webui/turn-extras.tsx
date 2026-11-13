@@ -23,6 +23,8 @@ export interface ToolCall {
   id: string
   name: string
   detail: string
+  /** 工具结果带 is_error：WS 投影会保留这个标记，是移动端唯一能看到的成败信号。 */
+  failed?: boolean
 }
 
 export interface TurnExtrasData {
@@ -97,6 +99,8 @@ export function extractTurnExtras(group: MessageGroup): TurnExtrasData {
   const tools: ToolCall[] = []
   const imageToolPaths = new Map<string, string>()
   const resolvedPaths = new Map<string, string>()
+  // tool_result 不保证紧跟 tool_use（可能被拆到不同消息里），先收标记最后再回填。
+  const failedIds = new Set<string>()
 
   for (const message of group.turnMessages) {
     const record = message as {
@@ -126,6 +130,7 @@ export function extractTurnExtras(group: MessageGroup): TurnExtrasData {
         continue
       }
       if (block.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue
+      if (block.is_error === true) failedIds.add(block.tool_use_id)
       // WS 投影形态：图片引用直接挂在 tool_result 块的 images 上。
       const images = Array.isArray(block.images) ? block.images : []
       let path = images.map(readImageRefPath).find((value): value is string => Boolean(value))
@@ -144,7 +149,12 @@ export function extractTurnExtras(group: MessageGroup): TurnExtrasData {
     const path = resolvedPaths.get(id) ?? original
     if (!imagePaths.includes(path)) imagePaths.push(path)
   }
-  return { tools, imagePaths }
+  return {
+    tools: failedIds.size === 0
+      ? tools
+      : tools.map((tool) => (failedIds.has(tool.id) ? { ...tool, failed: true } : tool)),
+    imagePaths,
+  }
 }
 
 /** 图片 data URL 缓存：同一张图在多次重渲染 / 重新加载历史时不重复走 WS。 */
@@ -184,6 +194,7 @@ function TurnImage({ path, loadImage }: {
     cached ? { status: 'ok', dataUrl: cached } : { status: 'loading' },
   )
   const [attempt, setAttempt] = React.useState(0)
+  const [expanded, setExpanded] = React.useState(false)
   // 成功即终点；error 不闩死，连接就绪（loadImage 身份变化）或手动重试都会再来一次。
   const settledRef = React.useRef(state.status === 'ok')
   const name = path.split(/[\\/]/).pop() || path
@@ -205,11 +216,33 @@ function TurnImage({ path, loadImage }: {
     return () => { alive = false }
   }, [path, loadImage, attempt])
 
+  // 大图是全屏浮层，必须能用 Esc 退出，否则键盘用户会被关在里面。
+  React.useEffect(() => {
+    if (!expanded) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setExpanded(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [expanded])
+
   if (state.status === 'ok') {
     return (
       <figure className="turn-image">
-        <img src={state.dataUrl} alt={name} />
+        <button className="turn-image-open" onClick={() => setExpanded(true)} title="点按查看大图">
+          <img src={state.dataUrl} alt={name} />
+        </button>
         <figcaption>{name}</figcaption>
+        {expanded && (
+          <div
+            className="img-viewer"
+            role="dialog"
+            aria-label={`${name}，点按任意处或按 Esc 关闭`}
+            onClick={() => setExpanded(false)}
+          >
+            <img src={state.dataUrl} alt={name} />
+          </div>
+        )}
       </figure>
     )
   }
@@ -266,8 +299,15 @@ export function TurnExtras({ tools, imagePaths, loadImage }: {
           {expanded && (
             <div className="tool-list">
               {tools.map((tool, index) => (
-                <div className="tool-row" key={`${tool.id}-${index}`} title={`${tool.name} ${tool.detail}`}>
-                  <span className="tool-name">{tool.name}</span>
+                <div
+                  className={`tool-row ${tool.failed ? 'failed' : ''}`}
+                  key={`${tool.id}-${index}`}
+                  title={`${tool.name}${tool.detail ? ` ${tool.detail}` : ''}`}
+                >
+                  <span className="tool-title">
+                    <span className="tool-name">{tool.name}</span>
+                    {tool.failed && <span className="tool-flag">失败</span>}
+                  </span>
                   {tool.detail && <span className="tool-detail">{tool.detail}</span>}
                 </div>
               ))}

@@ -122,4 +122,22 @@ describe('回合工具与图片提取', () => {
     expect(extractTurnExtras({ type: 'user', message: {} } as unknown as MessageGroup)).toEqual({ tools: [], imagePaths: [] })
     expect(extractTurnExtras(turn([{ type: 'text', text: '纯文本' }]))).toEqual({ tools: [], imagePaths: [] })
   })
+
+  test('Given 工具结果带 is_error When 提取 Then 标记该次调用失败，供界面着色', () => {
+    const result = extractTurnExtras(turn([
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'false' } },
+      { type: 'tool_use', id: 't2', name: 'Read', input: { file_path: 'a.ts' } },
+      { type: 'tool_result', tool_use_id: 't1', is_error: true },
+      { type: 'tool_result', tool_use_id: 't2' },
+    ]))
+    expect(result.tools.map((tool) => tool.failed)).toEqual([true, undefined])
+  })
+
+  test('Given 没有任何错误 When 提取 Then 不额外挂 failed 字段（保持快照可比）', () => {
+    const result = extractTurnExtras(turn([
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'true' } },
+      { type: 'tool_result', tool_use_id: 't1' },
+    ]))
+    expect(result.tools[0]).toEqual({ id: 't1', name: 'Bash', detail: 'true' })
+  })
 })

@@ -65,6 +65,11 @@
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
+/* 移动端键盘/地址栏会改变可视高度：100% 用的是布局视口，会被键盘顶出屏幕。
+   能用 dvh 就用 dvh，输入条才不会被键盘盖住。 */
+@supports (height: 100dvh) {
+  html, body, #root { height: 100dvh; }
+}
 
 body {
   background: var(--bg);
@@ -142,11 +147,16 @@ body {
   align-items: center;
   justify-self: end;
   gap: 6px;
+  min-width: 0;
+  max-width: 38vw;
   padding-right: 2px;
   color: var(--muted);
   font-size: 11px;
   white-space: nowrap;
 }
+/* 「连接断开 · <原因>」可能很长，必须截断，否则会把顶栏三列挤变形 */
+.conn .label { overflow: hidden; text-overflow: ellipsis; }
+.conn-dot { flex: none; }
 .conn-dot {
   width: 7px;
   height: 7px;
@@ -198,7 +208,7 @@ body {
 /* 助手消息：通栏无气泡，长文优先 */
 .turn.assistant .body { padding: 2px 0; }
 
-.body { min-width: 0; overflow-wrap: anywhere; }
+.body { min-width: 0; font-size: 15px; line-height: 1.62; overflow-wrap: anywhere; }
 .body > :first-child { margin-top: 0; }
 .body > :last-child { margin-bottom: 0; }
 .body p { margin: 0 0 12px; }
@@ -256,6 +266,26 @@ body {
 }
 .body th, .body td { padding: 6px 10px; border: 1px solid var(--hairline); text-align: left; }
 .body th { background: var(--surface-low); font-weight: 600; }
+
+/* 代码与表格要能横滚（触控板横滑 / 拖拽），但不画横条 —— 与主仓的滚动条规范一致 */
+.body pre, .body table { scrollbar-width: none; }
+.body pre::-webkit-scrollbar, .body table::-webkit-scrollbar { display: none; }
+
+/* ===== 向上续页 ===== */
+.load-older {
+  display: flex;
+  justify-content: center;
+  padding: 0 0 var(--sp-4);
+}
+.load-older-btn {
+  padding: 6px 16px;
+  border-radius: var(--r-pill);
+  border-color: var(--hairline);
+  background: var(--surface-low);
+  color: var(--muted);
+  font-size: 12px;
+}
+.load-older-btn:hover:not(:disabled) { border-color: var(--outline); color: var(--ink); }
 
 /* ===== 运行中指示：一个呼吸的点，不用骨架屏（避免和真实内容混淆） ===== */
 .running-hint {
@@ -446,7 +476,26 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
   font-size: 12px;
 }
 .tool-row + .tool-row { border-top: 1px solid var(--hairline); }
-.tool-name { color: var(--info); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.tool-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.tool-name {
+  overflow: hidden;
+  color: var(--info);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 成败是移动端唯一看得到的工具结果信号（正文被 WS 投影裁掉了） */
+.tool-row.failed .tool-name { color: var(--error); }
+.tool-flag {
+  flex: none;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--error-container);
+  color: var(--on-error-container);
+  font-size: 10px;
+  line-height: 15px;
+}
 .tool-detail {
   display: -webkit-box;
   width: 100%;
@@ -471,7 +520,17 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 /* 图片：卡片化，与消息列同宽 */
 .turn-images { display: flex; flex-direction: column; gap: var(--sp-2); margin-bottom: var(--sp-2); }
 .turn-image { margin: 0; }
-.turn-image img {
+/* 缩略图整体是按钮：手机上唯一可行的「看大图」入口 */
+.turn-image-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+.turn-image-open:hover { background: transparent; }
+.turn-image-open img {
   display: block;
   max-width: 100%;
   max-height: 460px;
@@ -479,6 +538,26 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
   border-radius: var(--r-md);
   object-fit: contain;
   background: var(--surface-low);
+}
+/* 全屏查看：fixed 跳出消息流，点任意处或 Esc 关闭 */
+.img-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+  background: rgba(12, 11, 10, .94);
+  cursor: zoom-out;
+}
+.img-viewer img {
+  max-width: 100%;
+  max-height: 100%;
+  border: 0;
+  border-radius: var(--r-md);
+  object-fit: contain;
+  background: transparent;
 }
 .turn-image figcaption { margin-top: 6px; color: #7d7a75; font-size: 11px; }
 .turn-image.placeholder {
@@ -578,6 +657,22 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 .iinput:focus { border-color: var(--outline); }
 .iprompts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--sp-2); }
 .iprompts button { padding: 5px 10px; font-size: 12px; }
+/* Goal 提议的契约三段：验收 / 约束 / 停止。左侧键名固定宽度对齐，值允许长断行 */
+.icontract {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 var(--sp-3);
+  padding: 10px var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--surface-lowest);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.icontract-row { display: flex; gap: var(--sp-2); }
+.icontract-key { flex: none; width: 28px; color: #7d7a75; }
+.icontract-val { flex: 1; min-width: 0; color: var(--ink); overflow-wrap: anywhere; }
+
 .ibtn { padding: 7px 14px; border-radius: var(--r-sm); font-size: 13px; }
 .ibtn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
 .ibtn.ghost:hover { background: var(--surface); color: var(--ink); }
@@ -591,7 +686,20 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
   border-radius: var(--r-md);
   background: var(--surface-low);
 }
-.goal-line { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+/* 状态行本身是展开开关：整行可点，但视觉上仍是一行文字 */
+.goal-line {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.goal-line:hover { background: transparent; }
 .goal-status {
   flex: none;
   padding: 2px 8px;
@@ -657,9 +765,11 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 
 /* ===== 窄屏：页面水平留白收到 12，顶栏 56 ===== */
 @media (max-width: 560px) {
-  .topbar { min-height: 56px; padding: 10px 12px; grid-template-columns: 36px minmax(0, 1fr) 36px; }
+  .topbar { min-height: 56px; padding: 10px 12px; grid-template-columns: 36px minmax(0, 1fr) auto; }
   .icon-btn { width: 36px; height: 36px; }
   .conn span.label { display: none; }
+  .body { font-size: 14.5px; line-height: 1.6; }
+  .body ul, .body ol { padding-left: 20px; }
   .notice, .goal-bar, .goal-new, .goal-launcher, .interactions { margin-left: 12px; margin-right: 12px; }
   .stream { padding: 12px 12px var(--sp-6); }
   .composer { padding-left: 12px; padding-right: 12px; }
