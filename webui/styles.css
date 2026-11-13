@@ -1189,9 +1189,9 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 }
 .goal-contract input:focus { border-color: var(--outline); }
 
-/* ===== Goal 编辑面板：覆盖层，不占消息区高度 ===== */
-.goal-sheet-scrim { position: fixed; inset: 0; z-index: 40; background: rgba(0, 0, 0, .48); }
-.goal-sheet {
+/* ===== 通用编辑面板（Goal / 预设）：覆盖层，不占消息区高度 ===== */
+.sheet-scrim { position: fixed; inset: 0; z-index: 40; background: rgba(0, 0, 0, .48); }
+.sheet {
   position: fixed;
   z-index: 41;
   left: 50%;
@@ -1211,11 +1211,11 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
   box-shadow: var(--float-shadow);
   transform: translate(-50%, -50%);
 }
-.goal-sheet-head { display: flex; flex-direction: column; gap: 2px; }
-.goal-sheet-head strong { font-size: 14px; font-weight: 500; }
-.goal-sheet-desc { color: #7d7a75; font-size: 11px; line-height: 1.5; }
-.goal-field { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 11px; }
-.goal-field input, .goal-field textarea {
+.sheet-head { display: flex; flex-direction: column; gap: 2px; }
+.sheet-head strong { font-size: 14px; font-weight: 500; }
+.sheet-desc { color: #7d7a75; font-size: 11px; line-height: 1.5; }
+.sheet-field { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 11px; }
+.sheet-field input, .sheet-field select, .sheet-field textarea {
   padding: 8px 10px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-xs);
@@ -1227,12 +1227,73 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
   outline: none;
   resize: vertical;
 }
-.goal-field input:focus, .goal-field textarea:focus { border-color: var(--outline); }
-.goal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
-.goal-sheet-note { margin: 0; color: #7d7a75; font-size: 10.5px; line-height: 1.6; }
-.goal-sheet-error { margin: 0; color: var(--error); font-size: 11.5px; }
-.goal-sheet-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: 2px; }
-.goal-sheet-actions button { padding: 6px 14px; font-size: 12.5px; }
+.sheet-field input:focus, .sheet-field select:focus, .sheet-field textarea:focus { border-color: var(--outline); }
+.sheet-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
+.sheet-note { margin: 0; color: #7d7a75; font-size: 10.5px; line-height: 1.6; }
+.sheet-error { margin: 0; color: var(--error); font-size: 11.5px; }
+
+/* ===== 预设面板：列表 + 编辑两视图 ===== */
+.preset-sheet { gap: var(--sp-3); }
+.preset-head { display: flex; align-items: center; gap: var(--sp-2); }
+.preset-head strong { flex: 1; font-size: 14px; font-weight: 500; }
+.preset-back, .preset-close {
+  flex: none; padding: 2px 8px; border: 0; background: transparent;
+  color: var(--muted); font: inherit; font-size: 12px;
+}
+.preset-close { font-size: 18px; line-height: 1; }
+.preset-back:hover, .preset-close:hover { color: var(--ink); }
+.preset-list { display: flex; flex-direction: column; gap: 6px; max-height: 52vh; overflow-y: auto; overscroll-behavior: contain; }
+.preset-empty { padding: var(--sp-4); color: #7d7a75; font-size: 11.5px; text-align: center; }
+.preset-item {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 10px; border: 1px solid var(--hairline);
+  border-radius: var(--r-sm); background: var(--surface-lowest);
+}
+.preset-item.active { border-color: var(--primary-container); background: var(--surface); }
+.preset-select {
+  display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0;
+  padding: 0; border: 0; background: transparent; color: inherit; text-align: left;
+}
+.preset-item-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.preset-checkmark { flex: none; width: 12px; color: var(--primary); font-size: 12px; }
+.preset-name { color: var(--ink); font-size: 12.5px; font-weight: 500; }
+.preset-badge {
+  padding: 1px 6px; border: 1px solid var(--hairline); border-radius: var(--r-pill);
+  color: var(--muted); font-size: 10px;
+}
+.preset-desc { padding-left: 18px; color: var(--muted); font-size: 11px; line-height: 1.5; word-break: break-word; }
+.preset-item-actions { display: flex; align-items: center; gap: var(--sp-2); padding-left: 18px; }
+.preset-item-actions button {
+  padding: 2px 8px; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11px;
+}
+.preset-item-actions button:hover { color: var(--ink); }
+.preset-default { color: var(--success); font-size: 10px; }
+.preset-form { display: flex; flex-direction: column; gap: var(--sp-2); }
+.preset-groups { display: flex; flex-direction: column; gap: 6px; }
+.preset-groups-label { color: var(--muted); font-size: 11px; }
+.preset-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.preset-check { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11.5px; }
+.preset-check input { accent-color: var(--primary); }
+.preset-mini-actions { display: flex; gap: var(--sp-2); }
+.preset-mini-actions button {
+  padding: 4px 10px; border: 1px solid var(--hairline); border-radius: var(--r-xs);
+  background: transparent; color: var(--muted); font: inherit; font-size: 11px;
+}
+.preset-danger { color: var(--error) !important; border-color: var(--error-container) !important; }
+/* 吸底：表单比面板高时，保存按钮不能滚出视野（用户会以为没有按钮） */
+.sheet-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: 2px;
+  padding: var(--sp-2) 0 2px;
+  border-top: 1px solid var(--hairline);
+  background: var(--surface-low);
+}
+.sheet-actions button { padding: 6px 14px; font-size: 12.5px; }
 
 /* ===== 窄屏：留白收到 12，顶栏 56 ===== */
 @media (max-width: 560px) {

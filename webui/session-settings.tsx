@@ -14,21 +14,28 @@ import {
   type ModelOption,
   type StrengthState,
 } from './model-selection'
+import { presetBadges, type WebPreset } from './preset-model'
 
 export interface SessionSettingsMenuProps {
   models: ModelOption[]
   currentModelId: string | undefined
   strength: StrengthState
+  /** 当前工作区可选的预设（已过滤明确停用项） */
+  presets: WebPreset[]
+  currentPresetId: string | undefined
   /** 会话正在跑：模型与档位都不接受修改 */
   running: boolean
   busy: boolean
   onPickModel: (option: ModelOption) => void
   onPickStrength: (value: string) => void
+  onPickPreset: (presetId: string) => void
+  onManagePresets: () => void
   onClose: () => void
 }
 
 export function SessionSettingsMenu({
-  models, currentModelId, strength, running, busy, onPickModel, onPickStrength, onClose,
+  models, currentModelId, strength, presets, currentPresetId,
+  running, busy, onPickModel, onPickStrength, onPickPreset, onManagePresets, onClose,
 }: SessionSettingsMenuProps): React.ReactElement {
   const groups = groupModelsByChannel(models)
   const singleChannel = groups.length <= 1
@@ -37,7 +44,7 @@ export function SessionSettingsMenu({
   return (
     <>
       <div className="menu-scrim" onClick={onClose} />
-      <div className="menu wide" role="menu" aria-label="模型与推理强度">
+      <div className="menu wide" role="menu" aria-label="模型、推理强度与预设">
         {running && <div className="menu-note">运行中不能切换，等这轮结束再改</div>}
 
         <div className="menu-label">模型</div>
@@ -91,14 +98,56 @@ export function SessionSettingsMenu({
             </button>
           )
         })}
+
+        <div className="menu-sep" />
+        <div className="menu-label">预设（岗位）</div>
+        {presets.length === 0 && <div className="menu-note">当前工作区暂无可选预设</div>}
+        {presets.map((preset) => {
+          const active = preset.id === currentPresetId
+          const badges = presetBadges(preset)
+          return (
+            <button
+              key={`${preset.scope}:${preset.id}`}
+              className={`menu-item ${active ? 'active' : ''}`}
+              role="menuitemradio"
+              aria-checked={active}
+              disabled={locked}
+              onClick={() => onPickPreset(preset.id)}
+            >
+              <span className="menu-item-text">
+                <span className="menu-item-label">{preset.name}</span>
+                <span className="menu-item-hint">
+                  {[preset.description, ...badges].filter(Boolean).join(' · ')}
+                </span>
+              </span>
+              {active && <span className="menu-check" aria-hidden="true">✓</span>}
+            </button>
+          )
+        })}
+        <button className="menu-item" onClick={onManagePresets}>
+          <span className="menu-item-text">
+            <span className="menu-item-label">管理预设…</span>
+            <span className="menu-item-hint">新建 / 复制 / 编辑 / 设为默认</span>
+          </span>
+        </button>
       </div>
     </>
   )
 }
 
-/** 顶栏那颗 chip 的文案：`Sonnet 4.5 · 高`。 */
-export function describeSessionModel(currentModelId: string | undefined, models: ModelOption[], strength: StrengthState): string {
+/** 顶栏那颗 chip 的文案：`预设 · Sonnet 4.5 · 高`；会话没绑预设时提醒先选。 */
+export function describeSessionModel(
+  currentModelId: string | undefined,
+  models: ModelOption[],
+  strength: StrengthState,
+  preset?: WebPreset | null,
+  presetRequired = false,
+): string {
+  const parts: string[] = []
+  if (preset?.name) parts.push(preset.name)
+  else if (presetRequired) parts.push('选择预设')
   const name = modelLabelFor(currentModelId, models)
-  const parts = [name, strength.label].filter(Boolean)
-  return parts.length > 0 ? parts.join(' · ') : '选择模型'
+  if (name) parts.push(name)
+  if (strength.label) parts.push(strength.label)
+  return parts.length > 0 ? parts.join(' · ') : '设置会话'
 }

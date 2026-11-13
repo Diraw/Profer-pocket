@@ -27,6 +27,8 @@
     "turn-process.tsx",
     "turn-meta.ts",
     "model-selection.ts",
+    "preset-model.ts",
+    "preset-panel.tsx",
     "session-settings.tsx",
     "goal.tsx",
     "goal-model.ts",

@@ -347,17 +347,17 @@ export function GoalEditor({ goal, busy, onClose, onSave }: {
 
   return (
     <>
-      <div className="goal-sheet-scrim" onClick={() => { if (!busy) onClose() }} />
-      <div className="goal-sheet" role="dialog" aria-modal="true" aria-label="编辑目标、契约与预算">
-        <div className="goal-sheet-head">
+      <div className="sheet-scrim" onClick={() => { if (!busy) onClose() }} />
+      <div className="sheet" role="dialog" aria-modal="true" aria-label="编辑目标、契约与预算">
+        <div className="sheet-head">
           <strong>编辑目标、契约与预算</strong>
-          <span className="goal-sheet-desc">沿用当前会话上下文与已有执行历史；修改只在非运行时生效。</span>
+          <span className="sheet-desc">沿用当前会话上下文与已有执行历史；修改只在非运行时生效。</span>
         </div>
-        <label className="goal-field">
+        <label className="sheet-field">
           <span>目标</span>
           <textarea rows={3} value={goalText} disabled={busy} onChange={(event) => setGoalText(event.target.value)} />
         </label>
-        <label className="goal-field">
+        <label className="sheet-field">
           <span>验收证据</span>
           <input
             value={contract.verification}
@@ -366,7 +366,7 @@ export function GoalEditor({ goal, busy, onClose, onSave }: {
             onChange={(event) => setContract((previous) => ({ ...previous, verification: event.target.value }))}
           />
         </label>
-        <label className="goal-field">
+        <label className="sheet-field">
           <span>执行约束</span>
           <input
             value={contract.constraints}
@@ -375,7 +375,7 @@ export function GoalEditor({ goal, busy, onClose, onSave }: {
             onChange={(event) => setContract((previous) => ({ ...previous, constraints: event.target.value }))}
           />
         </label>
-        <label className="goal-field">
+        <label className="sheet-field">
           <span>停止条件</span>
           <input
             value={contract.stopWhen}
@@ -384,30 +384,30 @@ export function GoalEditor({ goal, busy, onClose, onSave }: {
             onChange={(event) => setContract((previous) => ({ ...previous, stopWhen: event.target.value }))}
           />
         </label>
-        <div className="goal-grid">
-          <label className="goal-field">
+        <div className="sheet-grid">
+          <label className="sheet-field">
             <span>轮次上限</span>
             <input {...field('maxIterations')} placeholder="不限" disabled={busy} />
           </label>
-          <label className="goal-field">
+          <label className="sheet-field">
             <span>净运行时长（分钟）</span>
             <input {...field('maxDurationMinutes')} placeholder="不限" disabled={busy} />
           </label>
-          <label className="goal-field">
+          <label className="sheet-field">
             <span>连续无进展上限</span>
             <input {...field('maxConsecutiveFailures')} disabled={busy} />
           </label>
-          <label className="goal-field">
+          <label className="sheet-field">
             <span>Token 上限</span>
             <input {...field('maxTokens')} placeholder="不限" disabled={busy} />
           </label>
         </div>
-        <p className="goal-sheet-note">
+        <p className="sheet-note">
           已执行 {goal.iteration} 轮 · {formatGoalElapsed(goal.elapsedMs ?? 0)} · {(goal.usage?.totalTokens ?? 0).toLocaleString()} tokens。
           预算留空表示不限；时长与 token 在每轮结束时检查，快用完时会提示 Agent 收尾。
         </p>
-        {error && <p className="goal-sheet-error" role="alert">{error}</p>}
-        <div className="goal-sheet-actions">
+        {error && <p className="sheet-error" role="alert">{error}</p>}
+        <div className="sheet-actions">
           <button disabled={busy} onClick={onClose}>取消</button>
           <button disabled={busy} onClick={() => submit(false)}>保存</button>
           {canResumeAfterSave && goal.status !== 'completed' && (

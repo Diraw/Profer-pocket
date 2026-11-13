@@ -30,6 +30,15 @@ import {
 import { OLDER_PAGE, decodeMessagePage, mergePrepend, tailPageSize } from './message-page'
 import { FOLLOW_DEFAULT, modelLabelFor, normalizeChannelModels, resolveStrengthState, type ModelOption } from './model-selection'
 import { SessionSettingsMenu, describeSessionModel } from './session-settings'
+import { PresetPanel } from './preset-panel'
+import {
+  normalizePresets,
+  resolveCurrentPreset,
+  selectablePresets,
+  type PresetPatch,
+  type PresetReference,
+  type WebPreset,
+} from './preset-model'
 import { applyPageTitle } from './page-title'
 import { base64FromDataUrl, formatBytes, resolveSendText, validateAttachmentFile } from './attachments'
 import { GoalBar, GoalEditor, GoalLauncher, type GoalAction } from './goal'
@@ -70,6 +79,12 @@ interface SessionMeta {
   /** 会话级强度覆盖；null/缺省表示跟随预设 */
   agentEffort?: string | null
   openAIThinkingLevel?: string | null
+  /** 预设（岗位）：reference 是唯一真源，presetId 兼容旧数据 */
+  presetId?: string
+  presetReference?: PresetReference | null
+  /** 会话所属工作区 slug —— 预设是工作区级配置，所有预设命令都要带它 */
+  workspaceSlug?: string
+  revision?: number
 }
 
 /**
@@ -184,6 +199,12 @@ if (query.has('token')) {
   window.history.replaceState(null, '', clean.pathname + clean.search)
 }
 
+function isPresetReference(value: unknown): value is PresetReference {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  return typeof (value as { presetId?: unknown }).presetId === 'string'
+    && (value as { presetId: string }).presetId.length > 0
+}
+
 /** 流式期间同一回合会落多行快照；按 uuid 覆盖而不是追加，避免重复气泡。 */
 function upsertMessage(list: SDKMessage[], incoming: SDKMessage): SDKMessage[] {
   const uuid = (incoming as { uuid?: string }).uuid
@@ -232,6 +253,11 @@ function App(): React.ReactElement {
   const [switchingMode, setSwitchingMode] = React.useState(false)
   /** 模型 + 强度菜单；数据来自 list_channels（模型表）与 session_detail（当前选择） */
   const [settingsMenuOpen, setSettingsMenuOpen] = React.useState(false)
+  /** 预设（岗位）：列表、默认值、管理面板。作用域由会话的 workspaceSlug 决定 */
+  const [presets, setPresets] = React.useState<WebPreset[]>([])
+  const [presetsLoaded, setPresetsLoaded] = React.useState(false)
+  const [defaultPresetId, setDefaultPresetId] = React.useState('')
+  const [presetPanelOpen, setPresetPanelOpen] = React.useState(false)
   const [channels, setChannels] = React.useState<RemoteChannel[] | null>(null)
   /** Pi 内核下模型自带的推理档位；Claude 内核为 null（走 effort 四档） */
   const [reasoningLevels, setReasoningLevels] = React.useState<string[] | null>(null)
@@ -292,6 +318,14 @@ function App(): React.ReactElement {
     }),
     [reasoningLevels, meta?.openAIThinkingLevel, meta?.agentEffort],
   )
+  /** 明确停用的预设不进菜单；当前预设优先按带作用域的 reference 匹配 */
+  const availablePresets = React.useMemo(() => selectablePresets(presets), [presets])
+  const currentPreset = React.useMemo(
+    () => resolveCurrentPreset(availablePresets, meta?.presetId, meta?.presetReference),
+    [availablePresets, meta?.presetId, meta?.presetReference],
+  )
+  // 会话绑定的预设被停用/删除时，桌面上会亮角标提醒先选一个；网页端在 chip 上提示
+  const presetRequired = presetsLoaded && availablePresets.length > 0 && !currentPreset
   /**
    * 每轮的「模型 / 时间 / 来源 / token」。
    *
@@ -512,11 +546,11 @@ function App(): React.ReactElement {
    * 标题不是一次性的：新会话的标题由模型在首轮之后自动生成，页面在这一轮之前打开时
    * 拿到的是空标题，所以轮次结束后要重新取一次。
    */
-  const loadSessionMeta = React.useCallback(async (client: WsClient): Promise<void> => {
+  const loadSessionMeta = React.useCallback(async (client: WsClient): Promise<Record<string, unknown> | null> => {
     try {
       const detail = await client.sessionDetail(sessionId) as { meta?: Record<string, unknown>; data?: { meta?: Record<string, unknown> } } | null
       const raw = detail?.meta ?? detail?.data?.meta ?? null
-      if (!raw) return
+      if (!raw) return null
       setMeta({
         // 空标题保持空串，由标题栏与标签页各自决定兜底文案（不要拿 sessionId 当名字）
         title: typeof raw.title === 'string' ? raw.title.trim() : '',
@@ -527,9 +561,16 @@ function App(): React.ReactElement {
         agentRuntime: typeof raw.agentRuntime === 'string' ? raw.agentRuntime : undefined,
         agentEffort: typeof raw.agentEffort === 'string' ? raw.agentEffort : null,
         openAIThinkingLevel: typeof raw.openAIThinkingLevel === 'string' ? raw.openAIThinkingLevel : null,
+        presetId: typeof raw.presetId === 'string' ? raw.presetId : undefined,
+        presetReference: isPresetReference(raw.presetReference) ? raw.presetReference : null,
+        workspaceSlug: typeof raw.workspaceSlug === 'string' ? raw.workspaceSlug : undefined,
+        revision: typeof raw.revision === 'number' ? raw.revision : undefined,
       })
+      // 返回原始 meta：连接建立这一轮里 state 还没刷新，预设加载要直接用这份 workspaceSlug
+      return raw
     } catch (error) {
       setNotice(`读取会话信息失败：${error instanceof Error ? error.message : String(error)}`)
+      return null
     }
   }, [sessionId])
 
@@ -547,6 +588,28 @@ function App(): React.ReactElement {
       setChannels(null)
     }
   }, [])
+
+  /**
+   * 预设列表 + 工作区默认预设。
+   *
+   * 作用域必须是会话所属工作区的 slug：不传 slug 时服务端只会返回内置默认配置，
+   * 用户自己建的岗位会凭空消失。连接建立这一轮 state 还没刷新，所以允许显式传 slug。
+   */
+  const loadPresets = React.useCallback(async (client: WsClient, explicitSlug?: string): Promise<void> => {
+    const slug = explicitSlug ?? meta?.workspaceSlug
+    try {
+      const [raw, fallback] = await Promise.all([
+        client.listPresets(slug),
+        client.getDefaultPreset(slug),
+      ])
+      setPresets(normalizePresets(raw))
+      setDefaultPresetId(typeof fallback === 'string' ? fallback : '')
+      setPresetsLoaded(true)
+    } catch {
+      // 旧服务端或权限不足：只影响预设菜单，聊天照常
+      setPresetsLoaded(true)
+    }
+  }, [meta?.workspaceSlug])
 
   /**
    * Pi 内核的模型自带推理档位（off/minimal/low/…/max），Claude 内核只有 effort 四档。
@@ -715,8 +778,9 @@ function App(): React.ReactElement {
         return
       }
       // 会话信息失败不该拦住消息读取：loadSessionMeta 自己吞掉异常，只留一条 notice
-      await loadSessionMeta(client)
+      const rawMeta = await loadSessionMeta(client)
       await loadChannels(client)
+      await loadPresets(client, typeof rawMeta?.workspaceSlug === 'string' ? rawMeta.workspaceSlug : undefined)
       await reload(client)
       await loadInteractions(client)
       await loadGoal(client)
@@ -731,7 +795,7 @@ function App(): React.ReactElement {
       client.disconnect()
       clientRef.current = null
     }
-  }, [sessionId, token, reload, loadInteractions, loadGoal, loadGoalHistory, loadVisualizations, loadSessionMeta])
+  }, [sessionId, token, reload, loadInteractions, loadGoal, loadGoalHistory, loadVisualizations, loadSessionMeta, loadPresets])
 
   const respondPermission = React.useCallback(async (
     requestId: string,
@@ -860,6 +924,100 @@ function App(): React.ReactElement {
       setActing(false)
     }
   }, [acting, loadGoal, sessionId])
+
+  /** 切换预设（岗位）。服务端按会话所属工作区解析作用域，下一轮生效。 */
+  const applyPreset = async (presetId: string): Promise<void> => {
+    const client = clientRef.current
+    if (!client || acting) return
+    if (presetId === currentPreset?.id) {
+      setSettingsMenuOpen(false)
+      setPresetPanelOpen(false)
+      return
+    }
+    setActing(true)
+    try {
+      await client.updateSessionPreset(sessionId, presetId)
+      await loadSessionMeta(client)
+      setSettingsMenuOpen(false)
+      setPresetPanelOpen(false)
+      const name = presets.find((item) => item.id === presetId)?.name ?? presetId
+      setNotice(`已切换到「${name}」 · 下一轮消息生效`)
+    } catch (error) {
+      setNotice(`切换预设失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setActing(false)
+    }
+  }
+
+  /** 新建 / 编辑预设。失败返回 false，编辑器保留表单让人改完重试。 */
+  const savePreset = async (id: string | null, payload: PresetPatch | Record<string, unknown>): Promise<boolean> => {
+    const client = clientRef.current
+    if (!client || acting) return false
+    setActing(true)
+    try {
+      const updates = payload as unknown as Record<string, unknown>
+      if (id) await client.updatePreset(meta?.workspaceSlug, id, updates)
+      else await client.createPreset(meta?.workspaceSlug, updates)
+      await loadPresets(client)
+      setNotice(id ? '预设已更新' : '预设已创建')
+      return true
+    } catch (error) {
+      setNotice(`保存预设失败：${error instanceof Error ? error.message : String(error)}`)
+      return false
+    } finally {
+      setActing(false)
+    }
+  }
+
+  /** 内置预设不可编辑：复制是唯一能改它的方式，复制完直接打开编辑器。 */
+  const copyPreset = async (fromId: string): Promise<WebPreset | null> => {
+    const client = clientRef.current
+    if (!client || acting) return null
+    setActing(true)
+    try {
+      const created = normalizePresets([await client.copyPreset(meta?.workspaceSlug, fromId)])[0] ?? null
+      await loadPresets(client)
+      return created
+    } catch (error) {
+      setNotice(`复制预设失败：${error instanceof Error ? error.message : String(error)}`)
+      return null
+    } finally {
+      setActing(false)
+    }
+  }
+
+  const deletePreset = async (presetId: string): Promise<boolean> => {
+    const client = clientRef.current
+    if (!client || acting) return false
+    setActing(true)
+    try {
+      await client.deletePreset(meta?.workspaceSlug, presetId)
+      await loadPresets(client)
+      if (currentPreset?.id === presetId) await loadSessionMeta(client)
+      setNotice('预设已删除')
+      return true
+    } catch (error) {
+      setNotice(`删除预设失败：${error instanceof Error ? error.message : String(error)}`)
+      return false
+    } finally {
+      setActing(false)
+    }
+  }
+
+  const setPresetDefault = async (presetId: string): Promise<void> => {
+    const client = clientRef.current
+    if (!client || acting) return
+    setActing(true)
+    try {
+      await client.setDefaultPreset(meta?.workspaceSlug, presetId)
+      setDefaultPresetId(presetId)
+      setNotice('已设为工作区默认预设')
+    } catch (error) {
+      setNotice(`设置默认预设失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setActing(false)
+    }
+  }
 
   /**
    * Goal 提议确认。
@@ -1092,7 +1250,7 @@ function App(): React.ReactElement {
             disabled={!meta}
             title="切换模型与推理强度"
           >
-            {describeSessionModel(meta?.modelId, models, strength)}
+            {describeSessionModel(meta?.modelId, models, strength, currentPreset, presetRequired)}
           </button>
         </div>
         <div className="conn" title={connection}>
@@ -1128,10 +1286,14 @@ function App(): React.ReactElement {
           models={models}
           currentModelId={meta?.modelId}
           strength={strength}
+          presets={availablePresets}
+          currentPresetId={currentPreset?.id}
           running={sessionActive}
           busy={switchingModel}
           onPickModel={(option) => void pickModel(option)}
           onPickStrength={(value) => void pickStrength(value)}
+          onPickPreset={(id) => void applyPreset(id)}
+          onManagePresets={() => { setSettingsMenuOpen(false); setPresetPanelOpen(true) }}
           onClose={() => setSettingsMenuOpen(false)}
         />
       )}
@@ -1149,6 +1311,21 @@ function App(): React.ReactElement {
         : connected
           ? <GoalLauncher busy={acting} onStart={(text, contract) => void startGoal(text, contract)} />
           : null}
+      {presetPanelOpen && (
+        <PresetPanel
+          presets={availablePresets}
+          currentId={currentPreset?.id}
+          defaultPresetId={defaultPresetId}
+          models={models}
+          busy={acting}
+          onClose={() => setPresetPanelOpen(false)}
+          onApply={(id) => void applyPreset(id)}
+          onSave={(id, payload) => savePreset(id, payload)}
+          onCopy={(id) => copyPreset(id)}
+          onDelete={(id) => deletePreset(id)}
+          onSetDefault={(id) => void setPresetDefault(id)}
+        />
+      )}
       {/* 编辑面板做成覆盖层：它比状态条高得多，塞进状态条会把消息区挤到没有 */}
       {goalEditorOpen && goal && (
         <GoalEditor
