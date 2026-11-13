@@ -80,8 +80,12 @@ export function summarizeProcess(toolCount: number, thinkingCount: number, textC
  * 与桌面端同一条判据：该 text 之后只能是 thinking（reasoning 晚于正文到达的形态），
  * 且它之前的所有 tool_use 结果都得到齐 —— 否则这段 text 更可能是「给工具看的中间说明」，
  * 整轮应当收在过程组里。中途（结果未到）不外置，等结果回来再挪出去。
+ *
+ * `finished` 时放宽结果要求：这一轮已经结束（数据里出现了顶层 result），就不该再等结果。
+ * 真实会话里存在「工具被中断、结果永不落盘」的调用（实测有 1 个 inspect_preview 没有
+ * tool_result），死等会让整轮正文永久留在过程组里，用户以为没有回答。
  */
-function findHeadlineRange(items: TimelineItem[]): { start: number; end: number } | null {
+function findHeadlineRange(items: TimelineItem[], finished: boolean): { start: number; end: number } | null {
   let end = -1
   for (let index = items.length - 1; index >= 0; index--) {
     if (items[index]?.kind === 'text') { end = index; break }
@@ -90,13 +94,30 @@ function findHeadlineRange(items: TimelineItem[]): { start: number; end: number 
   for (let index = end + 1; index < items.length; index++) {
     if (items[index]?.kind !== 'thinking') return null
   }
-  for (let index = 0; index < end; index++) {
-    const item = items[index]
-    if (item?.kind === 'tool' && !item.tool.done) return null
+  if (!finished) {
+    for (let index = 0; index < end; index++) {
+      const item = items[index]
+      if (item?.kind === 'tool' && !item.tool.done) return null
+    }
   }
   let start = end
   while (start > 0 && items[start - 1]?.kind === 'text') start--
   return { start, end }
+}
+
+/**
+ * 这一轮是否已经跑完。
+ *
+ * 判据用数据而不是客户端的 `running` 状态：只要 turn 里出现了**顶层** result（子代理的
+ * result 带 parent_tool_use_id，不算），就说明这轮已收尾。客户端状态会被迟到的收尾
+ * 消息重新顶成 true，靠它决定「过程组是否收起」会永远收不起来。
+ */
+export function isTurnFinished(group: MessageGroup | undefined): boolean {
+  if (!group || group.type !== 'assistant-turn') return false
+  return group.turnMessages.some((message) => {
+    const record = message as { type?: string; parent_tool_use_id?: string | null }
+    return record.type === 'result' && !record.parent_tool_use_id
+  })
 }
 
 /**
@@ -107,7 +128,6 @@ function findHeadlineRange(items: TimelineItem[]): { start: number; end: number 
  */
 export function buildAssistantTimeline(group: MessageGroup | undefined): AssistantTimeline {
   if (!group || group.type !== 'assistant-turn') return emptyTimeline()
-
   const resultIds = new Set<string>()
   const failedIds = new Set<string>()
   for (const message of group.turnMessages) {
@@ -157,7 +177,7 @@ export function buildAssistantTimeline(group: MessageGroup | undefined): Assista
     }
   }
 
-  const range = findHeadlineRange(items)
+  const range = findHeadlineRange(items, isTurnFinished(group))
   const headline = range
     ? items.slice(range.start, range.end + 1)
       .map((item) => (item.kind === 'text' ? item.text : ''))

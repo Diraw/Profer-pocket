@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import type { MessageGroup } from '@profer/session-core'
-import { buildAssistantTimeline, summarizeProcess, toolLabel } from './turn-timeline'
+import { buildAssistantTimeline, isTurnFinished, summarizeProcess, toolLabel } from './turn-timeline'
 
-/** 一轮 = 若干 assistant 消息 + 承载 tool_result 的 user 消息。 */
+/** 一轮 = 若干 assistant 消息 + 承载 tool_result 的 user 消息（tail 用来追加 result 等收尾消息）。 */
 function turnOf(
   contents: unknown[][],
   results: Array<{ id: string; error?: boolean }> = [],
+  tail: unknown[] = [],
 ): MessageGroup {
   const assistant = contents.map((content, index) => ({
     type: 'assistant' as const,
@@ -26,9 +27,14 @@ function turnOf(
   return {
     type: 'assistant-turn',
     assistantMessages: assistant,
-    turnMessages: [...assistant, ...toolResults],
+    turnMessages: [...assistant, ...toolResults, ...tail],
   } as never as MessageGroup
 }
+
+/** 顶层 result：整轮收尾的唯一可靠信号（子代理的 result 带 parent_tool_use_id）。 */
+const result = (parentToolUseId: string | null = null): unknown => ({
+  type: 'result', uuid: `res-${parentToolUseId ?? 'top'}`, parent_tool_use_id: parentToolUseId,
+})
 
 const text = (value: string): unknown => ({ type: 'text', text: value })
 const thinking = (value: string): unknown => ({ type: 'thinking', thinking: value })
@@ -80,6 +86,50 @@ describe('过程时间线：顺序与正文外置', () => {
     const timeline = buildAssistantTimeline(turnOf([[thinking('先想一下'), tool('t1', 'Glob', {}, '*.ts')]]))
     expect(timeline.headline).toBe('')
     expect(timeline.summary).toBe('执行过程：1 次工具调用，1 段思考')
+  })
+
+  test('Given 有工具结果永不回来但整轮已收尾 When 拆分 Then 正文仍然外置（否则用户以为没有回答）', () => {
+    // 真实形态：工具被中断，tool_result 从未落盘；死等结果会让正文永久锁在过程组里
+    const timeline = buildAssistantTimeline(turnOf([
+      [tool('t1', 'inspect_preview', {}, '预览')],
+      [text('预览器有故障，但页面本身可以看。')],
+    ], [], [result()]))
+    expect(timeline.headline).toBe('预览器有故障，但页面本身可以看。')
+    expect(timeline.items.map((item) => item.kind)).toEqual(['tool'])
+  })
+
+  test('Given 同样的形态但这轮还在跑 When 拆分 Then 保守地不外置，等结果', () => {
+    const timeline = buildAssistantTimeline(turnOf([
+      [tool('t1', 'inspect_preview', {}, '预览')],
+      [text('我先看看这一页')],
+    ]))
+    expect(timeline.headline).toBe('')
+  })
+
+  test('Given 末尾正文之后还有工具 When 拆分 Then 仍不外置 —— 那是中间说明不是最终答复', () => {
+    const timeline = buildAssistantTimeline(turnOf([
+      [text('我先确认一下')],
+      [tool('t1', 'Bash', {}, 'ls')],
+    ], [{ id: 't1' }], [result()]))
+    expect(timeline.headline).toBe('')
+  })
+})
+
+describe('轮次是否收尾', () => {
+  test('Given 有顶层 result When 判定 Then 已收尾', () => {
+    expect(isTurnFinished(turnOf([[text('好了')]], [], [result()]))).toBe(true)
+  })
+
+  test('Given 只有子代理 result When 判定 Then 不算收尾（子任务结束≠整轮结束）', () => {
+    expect(isTurnFinished(turnOf([[text('进行中')]], [], [result('tool-abc')]))).toBe(false)
+  })
+
+  test('Given 没有任何 result When 判定 Then 未收尾', () => {
+    expect(isTurnFinished(turnOf([[text('进行中')]]))).toBe(false)
+  })
+
+  test('Given 非 assistant-turn 分组 When 判定 Then 一律视为未收尾', () => {
+    expect(isTurnFinished(undefined)).toBe(false)
   })
 })
 

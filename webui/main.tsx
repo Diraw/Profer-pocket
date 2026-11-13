@@ -16,7 +16,7 @@ import type { SDKMessage } from '@profer/shared'
 import { groupIntoTurns, toTranscript } from '@profer/session-core'
 import { TurnImages, extractTurnExtras, stripContextBlocks, type ImageLoadResult } from './turn-extras'
 import { TurnProcess } from './turn-process'
-import { buildAssistantTimeline } from './turn-timeline'
+import { buildAssistantTimeline, isTurnFinished } from './turn-timeline'
 import { OLDER_PAGE, decodeMessagePage, mergePrepend, tailPageSize } from './message-page'
 import { applyPageTitle } from './page-title'
 import { base64FromDataUrl, formatBytes, resolveSendText, validateAttachmentFile } from './attachments'
@@ -188,6 +188,23 @@ function App(): React.ReactElement {
   const extras = React.useMemo(() => groups.map(extractTurnExtras), [groups])
   /** 过程时间线：把每轮拆成「最终正文 + 交织的叙述/工具/思考」。 */
   const timelines = React.useMemo(() => groups.map(buildAssistantTimeline), [groups])
+  /**
+   * 「这一轮还有事在跑」。running 只是传输层的猜测——收尾消息（result / system /
+   * prompt_suggestion）在 run_completed 之后还会到，会把 running 顶回 true。
+   * 所以对外表现统一叠一道数据判据：最后一轮已收尾，就不再当作运行中。
+   *
+   * 只看「最后一条 user / assistant-turn」：尾部可能挂着 system 消息（task_notification 等），
+   * 它们既不属于对话也不算收尾；而刚发出新消息时最后一条是 user，必须判定为「在跑」。
+   */
+  const lastTurnFinished = React.useMemo(() => {
+    for (let index = groups.length - 1; index >= 0; index--) {
+      const group = groups[index]
+      if (!group || group.type === 'system') continue
+      return group.type === 'assistant-turn' ? isTurnFinished(group) : false
+    }
+    return false
+  }, [groups])
+  const sessionActive = running && !lastTurnFinished
   const hasPending = permissions.length + askUsers.length + exitPlans.length > 0
   /** 提议不阻塞运行，所以只影响「是否渲染卡片区」，不锁输入框。 */
   const hasCards = hasPending || goalProposals.length > 0
@@ -266,7 +283,7 @@ function App(): React.ReactElement {
 
   React.useEffect(() => {
     if (atBottomRef.current) scrollToLatest(false)
-  }, [groups, hasPending, running, scrollToLatest])
+  }, [groups, hasPending, sessionActive, scrollToLatest])
 
   /** 输入框自增长；先归 auto 再取 scrollHeight，否则删字后高度不会回缩。 */
   React.useEffect(() => {
@@ -438,7 +455,12 @@ function App(): React.ReactElement {
         } | null
         if (payload?.kind === 'sdk_message' && payload.message) {
           setMessages((previous) => upsertMessage(previous, payload.message as SDKMessage))
-          setRunning(true)
+          // 只有真正的内容消息才算「又在跑了」。result / system / prompt_suggestion 这类
+          // 收尾消息会在 run_completed 之后陆续到达（prompt_suggestion 甚至是跑完才生成），
+          // 无条件 setRunning(true) 会把状态永久顶回运行中 —— 表现就是执行过程组再也不收起，
+          // 正文被压在展开的过程组下面，看起来像「没有正式回复」。
+          const messageType = (payload.message as { type?: string }).type
+          if (messageType === 'assistant' || messageType === 'user') setRunning(true)
           return
         }
         if (payload?.kind !== 'profer_event') return
@@ -881,7 +903,9 @@ function App(): React.ReactElement {
             const turnViz = (timeline?.items ?? [])
               .flatMap((item) => (item.kind === 'tool' ? [vizByTool.get(item.tool.id)] : []))
               .filter((item): item is VisualizationItem => Boolean(item))
-            const live = running && turn.index === turns.length - 1
+            // 过程组只在「这一轮还在跑」时自动展开：running 可能被迟到的收尾消息顶住，
+            // 所以再叠一道数据判据，跑完的轮次一律收起，正文才能露出来。
+            const live = sessionActive && turn.index === turns.length - 1
             return (
               <div className={`turn ${turn.role === 'user' ? 'user' : 'assistant'}`} key={turn.index}>
                 {isAssistant && timeline && <TurnProcess timeline={timeline} live={live} />}
@@ -901,7 +925,7 @@ function App(): React.ReactElement {
               <VisualizationList items={orphanVisualizations} />
             </div>
           )}
-          {running && (
+          {sessionActive && (
             <div className="running-hint">Profer 正在处理</div>
           )}
         </div>
@@ -992,7 +1016,7 @@ function App(): React.ReactElement {
             }}
           />
           {/* 一个位置一个主动作：能发就是发送，运行中且没内容才是停止 */}
-          {running && !input.trim() && readyAttachments.length === 0 ? (
+          {sessionActive && !input.trim() && readyAttachments.length === 0 ? (
             <button className="send-btn run" onClick={() => void stop()} title="停止本轮运行">■</button>
           ) : (
             <button
@@ -1006,7 +1030,7 @@ function App(): React.ReactElement {
           )}
         </div>
         <div className="composer-meta">
-          <span>{hasPending ? '待确认' : running ? '运行中' : connected ? '空闲' : connection}</span>
+          <span>{hasPending ? '待确认' : sessionActive ? '运行中' : connected ? '空闲' : connection}</span>
           <span className="spacer" />
           <span title={sessionId}>会话 {sessionId ? sessionId.slice(0, 8) : '未指定'}</span>
           <span>·</span>
