@@ -121,6 +121,32 @@ export function isTurnFinished(group: MessageGroup | undefined): boolean {
 }
 
 /**
+ * 这一轮是否「已经收尾到可以收起过程组」。
+ *
+ * 权威判据是顶层 `result`（`isTurnFinished`），但 **WebUI 拿不到它**：
+ * 服务端 `projectSdkMessagesToPocketView` 只保留 user/assistant/status，
+ * result / system 消息会被整条过滤掉。于是网页端这道判据永远 false，
+ * 只能靠 `running` 状态；而最后一条 assistant 消息可能在 `run_completed` 之后才到，
+ * 把 running 重新顶成 true —— 表现就是过程组再也不收起，正文被压在下面。
+ *
+ * 所以补一条**投影里仍然存在**的数据判据：最终正文已经抽出（`headline` 非空），
+ * 且没有还没拿到结果的工具调用。二者同时成立时，这一轮对用户而言已经完成。
+ * 若之后又来了新工具调用，`findHeadlineRange` 会把这段 text 重新收回 `items`，
+ * headline 变空，过程组自然再展开 —— 不会误伤仍在继续的一轮。
+ */
+export function isTurnSettled(
+  group: MessageGroup | undefined,
+  timeline: AssistantTimeline | undefined,
+): boolean {
+  if (!group || group.type !== 'assistant-turn') return false
+  if (isTurnFinished(group)) return true
+  if (!timeline) return false
+  const hasHeadline = Boolean(timeline.headline.trim())
+  const pendingTool = timeline.items.some((item) => item.kind === 'tool' && !item.tool.done)
+  return hasHeadline && !pendingTool
+}
+
+/**
  * 收集一轮里的过程条目。
  *
  * 两遍扫描：先收工具结果（决定 done / failed），再按原始顺序排块 ——

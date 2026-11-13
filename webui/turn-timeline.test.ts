@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { MessageGroup } from '@profer/session-core'
-import { buildAssistantTimeline, isTurnFinished, summarizeProcess, toolLabel } from './turn-timeline'
+import { buildAssistantTimeline, isTurnFinished, isTurnSettled, summarizeProcess, toolLabel } from './turn-timeline'
 
 /** 一轮 = 若干 assistant 消息 + 承载 tool_result 的 user 消息（tail 用来追加 result 等收尾消息）。 */
 function turnOf(
@@ -200,5 +200,49 @@ describe('非助手回合', () => {
 
   test('Given 没有分组 When 派生 Then 空时间线，调用方不必判空', () => {
     expect(buildAssistantTimeline(undefined).summary).toBe('执行过程')
+  })
+})
+
+describe('过程组收起判据（WebUI 看不到 result）', () => {
+  const text = (value: string) => [{ type: 'text', text: value }]
+  const tool = (id: string) => [{ type: 'tool_use', id, name: 'Read', input: { file_path: '/tmp/a' } }]
+
+  test('Given 有顶层 result When 判定收尾 Then true（权威判据仍然生效）', () => {
+    const group = turnOf([tool('t1')], [{ id: 't1' }], [{ type: 'result', subtype: 'success' }])
+    expect(isTurnSettled(group, buildAssistantTimeline(group))).toBe(true)
+  })
+
+  test('Given 没有 result 但最终正文已抽出、工具都完成 When 判定收尾 Then true', () => {
+    // 这就是网页端的真实形态：projectSdkMessagesToPocketView 会把 result 整条过滤掉
+    const group = turnOf([tool('t1'), text('已经做完了。')], [{ id: 't1' }])
+    const timeline = buildAssistantTimeline(group)
+    expect(timeline.headline).toContain('已经做完了')
+    expect(isTurnFinished(group)).toBe(false)
+    expect(isTurnSettled(group, timeline)).toBe(true)
+  })
+
+  test('Given 最终正文已出现但还有工具没拿到结果 When 判定收尾 Then false（不能提前收起）', () => {
+    const group = turnOf([tool('t1'), tool('t2'), text('先写到这里。')], [{ id: 't1' }])
+    const timeline = buildAssistantTimeline(group)
+    expect(isTurnSettled(group, timeline)).toBe(false)
+  })
+
+  test('Given 只有工具调用没有正文 When 判定收尾 Then false', () => {
+    const group = turnOf([tool('t1')], [{ id: 't1' }])
+    expect(isTurnSettled(group, buildAssistantTimeline(group))).toBe(false)
+  })
+
+  test('Given 用户回合 / 空分组 When 判定收尾 Then false', () => {
+    expect(isTurnSettled(undefined, undefined)).toBe(false)
+    expect(isTurnSettled({ type: 'user', message: {} } as never, undefined)).toBe(false)
+  })
+
+  test('Given 收尾后又来了新工具调用 When 重算 Then headline 被收回 items，判据变回 false', () => {
+    const settled = turnOf([tool('t1'), text('做完了。')], [{ id: 't1' }])
+    expect(isTurnSettled(settled, buildAssistantTimeline(settled))).toBe(true)
+    const continued = turnOf([tool('t1'), text('做完了。'), tool('t2')], [{ id: 't1' }])
+    const timeline = buildAssistantTimeline(continued)
+    expect(timeline.headline).toBe('')
+    expect(isTurnSettled(continued, timeline)).toBe(false)
   })
 })

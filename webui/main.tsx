@@ -16,7 +16,7 @@ import type { SDKMessage } from '@profer/shared'
 import { groupIntoTurns, toTranscript } from '@profer/session-core'
 import { TurnImages, extractTurnExtras, stripContextBlocks, type ImageLoadResult } from './turn-extras'
 import { TurnProcess } from './turn-process'
-import { buildAssistantTimeline, isTurnFinished } from './turn-timeline'
+import { buildAssistantTimeline, isTurnSettled } from './turn-timeline'
 import {
   SOURCE_LABELS,
   describeUsage,
@@ -287,21 +287,27 @@ function App(): React.ReactElement {
   /** 过程时间线：把每轮拆成「最终正文 + 交织的叙述/工具/思考」。 */
   const timelines = React.useMemo(() => groups.map(buildAssistantTimeline), [groups])
   /**
-   * 「这一轮还有事在跑」。running 只是传输层的猜测——收尾消息（result / system /
-   * prompt_suggestion）在 run_completed 之后还会到，会把 running 顶回 true。
-   * 所以对外表现统一叠一道数据判据：最后一轮已收尾，就不再当作运行中。
+   * 「这一轮还有事在跑」。running 只是传输层的猜测，两个方向都会错：
+   * ① 收尾后迟到的 assistant 消息会把它顶回 true；② 3 秒内连发的 run_completed
+   * 曾被节流整条吞掉（连 setRunning(false) 都不执行）。
    *
-   * 只看「最后一条 user / assistant-turn」：尾部可能挂着 system 消息（task_notification 等），
-   * 它们既不属于对话也不算收尾；而刚发出新消息时最后一条是 user，必须判定为「在跑」。
+   * 所以对外表现统一叠一道数据判据：最后一轮已收尾，就不再当作运行中。
+   * 注意 **WebUI 看不到顶层 result**：服务端 `projectSdkMessagesToPocketView`
+   * 只保留 user/assistant/status，result 被整条过滤。旧实现只用 isTurnFinished
+   * 判「已收尾」，在网页端恒为 false，等于没加这道判据 —— 这正是问题反复出现的原因。
+   * 改用 isTurnSettled：有 result 就用 result，否则看「最终正文已抽出且没有未完成工具」。
+   *
+   * 只看「最后一条 user / assistant-turn」：尾部可能挂着 system 消息，它们既不属于
+   * 对话也不算收尾；而刚发出新消息时最后一条是 user，必须判定为「在跑」。
    */
   const lastTurnFinished = React.useMemo(() => {
     for (let index = groups.length - 1; index >= 0; index--) {
       const group = groups[index]
       if (!group || group.type === 'system') continue
-      return group.type === 'assistant-turn' ? isTurnFinished(group) : false
+      return group.type === 'assistant-turn' ? isTurnSettled(group, timelines[index]) : false
     }
     return false
-  }, [groups])
+  }, [groups, timelines])
   const sessionActive = running && !lastTurnFinished
   /** 内核决定用哪套推理档位；缺省按 claude 处理（历史会话与旧服务端都是这个默认） */
   const agentRuntime = meta?.agentRuntime ?? 'claude'
@@ -750,12 +756,14 @@ function App(): React.ReactElement {
               : [...previous, item])
           }
         }
-        // run_completed 与 run_idle 会在同一轮先后到达，3 秒内只收敛一次。
+        // run_completed 与 run_idle 会在同一轮先后到达，3 秒内只收敛一次「重拉」副作用。
+        // 但 setRunning(false) 必须每次都执行：以前它也被节流吞掉，连着两轮时
+        // 第二轮的 completion 不生效，过程组就一直保持展开。
         if (type === 'run_completed' || type === 'run_idle') {
+          setRunning(false)
           const now = Date.now()
           if (now - lastCompletedRef.current > 3000) {
             lastCompletedRef.current = now
-            setRunning(false)
             void reload(client)
             void loadGoal(client)
             void loadVisualizations(client)
