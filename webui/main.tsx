@@ -106,15 +106,44 @@ const PERMISSION_MODES: ReadonlyArray<{
   { mode: 'plan', short: '计划', label: '计划模式', hint: '只出方案不动手，你批准后才执行' },
 ]
 
+/**
+ * 凭据的本地副本。这个 key 必须与主进程 `webui-service.ts` 里未授权自愈页的脚本一致
+ * （那边硬编码了同名字符串），否则手机上 cookie 被回收后就自愈不回来了。
+ */
+const TOKEN_STORAGE_KEY = 'profer-webui-token'
+
+/**
+ * localStorage 在部分隐私模式/配额为 0 时会**直接抛异常**。
+ * 读不到只该失去「刷新自愈」，绝不能让整页在挂载前崩掉（那会表现为白屏 + 连不上）。
+ */
+function readStoredToken(): string {
+  try {
+    return localStorage.getItem(TOKEN_STORAGE_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function storeToken(value: string): void {
+  try {
+    localStorage.setItem(TOKEN_STORAGE_KEY, value)
+  } catch {
+    /* 隐私模式下写不进去：仍然可以用当前这次会话，只是刷新后要重带 token */
+  }
+}
+
 const boot = window.__PROFER_WEBUI_BOOT__
 const query = new URLSearchParams(window.location.search)
+/** 片段只在本机可见，不会进服务端日志与 Referer —— 适合做「永久链接」那种带凭据的书签。 */
+const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ''))
 const pathMatch = window.location.pathname.match(/^\/s\/([^/]+)/)
 const pathId = pathMatch?.[1] ? decodeURIComponent(pathMatch[1]) : ''
-const sessionId = boot?.sessionId ?? query.get('session') ?? pathId
-const token = boot?.token ?? query.get('token') ?? localStorage.getItem('profer-webui-token') ?? ''
+const sessionId = boot?.sessionId ?? query.get('session') ?? fragment.get('session') ?? pathId
+const token = boot?.token ?? query.get('token') ?? fragment.get('token') ?? readStoredToken()
 
 // 首屏凭据只用于过一次鉴权：立即从地址栏抹掉，避免留在浏览器历史 / Referer 里。
-if (token) localStorage.setItem('profer-webui-token', token)
+// 片段里的 token 不动 —— 用户是特意把它留在书签里的。
+if (token) storeToken(token)
 if (query.has('token')) {
   const clean = new URL(window.location.href)
   clean.searchParams.delete('token')
@@ -530,6 +559,16 @@ function App(): React.ReactElement {
     })
     clientRef.current = client
     client.connect()
+    /**
+     * 手机上切到后台/锁屏后，系统会掐掉 WS，而重连定时器在后台被冻结 ——
+     * 回到页面时可能一直停在「连接断开」。恢复前台或网络恢复时立刻补一次重连
+     * （reconnectNow 对已连上的连接是 no-op，不会打断会话）。
+     */
+    const wake = (): void => {
+      if (document.visibilityState === 'visible') client.reconnectNow()
+    }
+    document.addEventListener('visibilitychange', wake)
+    window.addEventListener('online', wake)
     // 5 秒兜底轮询，覆盖事件丢失与重连；与桌面端 pending-interaction 收敛节奏一致。
     const poll = window.setInterval(() => { void loadInteractions(client) }, 5000)
     void (async () => {
@@ -551,6 +590,8 @@ function App(): React.ReactElement {
     })()
     return () => {
       cancelled = true
+      document.removeEventListener('visibilitychange', wake)
+      window.removeEventListener('online', wake)
       window.clearInterval(poll)
       client.disconnect()
       clientRef.current = null
@@ -870,11 +911,15 @@ function App(): React.ReactElement {
           )}
           {turns.length === 0 ? (
             <div className="empty">
-              <div className="empty-title">{connected ? '开始对话' : '正在连接'}</div>
+              <div className="empty-title">{!token ? '需要访问凭据' : connected ? '开始对话' : '正在连接'}</div>
               <div className="empty-desc">
-                {connected
-                  ? '这个页面只承载当前这一个会话。消息实时推送，并与电脑端保持同一份记录。'
-                  : '正在连接 Profer 主进程。若长时间无响应，请确认电脑端的 Web 会话仍处于启用状态。'}
+                {!token
+                  // 走到这里说明 cookie、URL、localStorage 里都没有凭据了（例如清过站点数据）。
+                  // 与其显示「正在连接」让人干等，不如直接说清楚下一步做什么。
+                  ? '当前浏览器没有保存这个会话的凭据。请在电脑端 Profer 的「设置 → 远程连接 → Web 会话」里复制链接，重新打开一次。'
+                  : connected
+                    ? '这个页面只承载当前这一个会话。消息实时推送，并与电脑端保持同一份记录。'
+                    : '正在连接 Profer 主进程。若长时间无响应，请确认电脑端的 Web 会话仍处于启用状态。'}
               </div>
               {connected && (
                 <div className="empty-chips">
