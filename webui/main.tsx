@@ -43,7 +43,7 @@ import { applyPageTitle } from './page-title'
 import { base64FromDataUrl, formatBytes, resolveSendText, validateAttachmentFile } from './attachments'
 import { GoalBar, GoalEditor, GoalLauncher, type GoalAction } from './goal'
 import { normalizeGoal, normalizeGoalHistory, type GoalContract, type GoalLimits, type GoalState } from './goal-model'
-import { VisualizationList, normalizeVisualizations, type VisualizationItem } from './visualization'
+import { VisualizationList, normalizeVisualizations, placeOrphanVisualizations, type VisualizationItem } from './visualization'
 import { WsClient, defaultWsUrl } from '../src/renderer/pocket/ws-client'
 import {
   InteractionCards,
@@ -337,6 +337,7 @@ function App(): React.ReactElement {
     const usage = sumTurnUsage(group)
     const source = resolveTurnSource(group)
     return {
+      at: resolveTurnTime(group),
       model: modelLabelFor(resolveTurnModel(group), models),
       clock: formatClock(resolveTurnTime(group)),
       sourceLabel: source ? SOURCE_LABELS[source] : '',
@@ -357,7 +358,10 @@ function App(): React.ReactElement {
   }, [visualizations])
   /**
    * 没有任何已加载回合引用到的图表。分页只取尾部，较早回合的工具行可能不在窗口里；
-   * 这时若直接丢弃，图表会凭空消失 —— 退到列表末尾集中展示，读起来也不割裂。
+   * 这时若直接丢弃，图表会凭空消失 —— 所以保留，但必须按时间插回它该在的位置。
+   *
+   * 旧实现统一追加到消息流末尾：一张很早的图会出现在所有对话之后，
+   * 看起来像「图表自己跑到了最下面」。
    */
   const orphanVisualizations = React.useMemo(() => {
     const matched = new Set<string>()
@@ -368,6 +372,14 @@ function App(): React.ReactElement {
     }
     return visualizations.filter((item) => !matched.has(item.toolCallId))
   }, [timelines, visualizations])
+  /** 插入位置 → 该位置要显示的孤儿图表；键为 turns.length 表示确实属于最新之后 */
+  const vizSlots = React.useMemo(
+    () => placeOrphanVisualizations(
+      orphanVisualizations,
+      turns.map((turn) => turnMetas[turn.index]?.at),
+    ),
+    [orphanVisualizations, turns, turnMetas],
+  )
 
   // 标签页名字就是会话名：同时开多个会话页时，光看标签就能认出哪个是哪个。
   // 首屏标题已由服务端按会话名注入，所以会话信息没到之前什么都不做 —— 否则会先冲回兜底文案。
@@ -1390,34 +1402,46 @@ function App(): React.ReactElement {
             const turnMeta = turnMetas[turn.index]
             const hasMeta = Boolean(turnMeta
               && (turnMeta.model || turnMeta.clock || turnMeta.sourceLabel || turnMeta.usageText))
+            // 属于这一回合之前的孤儿图表（工具行还没加载进来），按时间就地补上，
+            // 不集中丢到消息流末尾
+            const leadingViz = vizSlots.get(turn.index) ?? []
             return (
-              <div className={`turn ${turn.role === 'user' ? 'user' : 'assistant'}`} key={turn.index}>
-                {isAssistant && timeline && <TurnProcess timeline={timeline} live={live} />}
-                {body && (
-                  <div className="body">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+              <React.Fragment key={turn.index}>
+                {leadingViz.length > 0 && (
+                  <div className="turn assistant viz-orphan">
+                    <div className="viz-orphan-label">较早的图表</div>
+                    <VisualizationList items={leadingViz} />
                   </div>
                 )}
-                <TurnImages imagePaths={extra?.imagePaths ?? []} loadImage={loadImage} />
-                <VisualizationList items={turnViz} />
-                {/* 来源与时间：只对「谁发的」有意义，助手回合省掉来源标签 */}
-                {hasMeta && turnMeta && (
-                  <div className="turn-meta">
-                    {turnMeta.model && <span className="tm-model">{turnMeta.model}</span>}
-                    {turnMeta.sourceLabel && <span className="tm-src">{turnMeta.sourceLabel}</span>}
-                    {turnMeta.clock && <span className="tm-clock">{turnMeta.clock}</span>}
-                    {turnMeta.usageText && (
-                      <span className="tm-usage" title={turnMeta.usageDetail}>{turnMeta.usageText}</span>
-                    )}
-                  </div>
-                )}
-              </div>
+                <div className={`turn ${turn.role === 'user' ? 'user' : 'assistant'}`}>
+                  {isAssistant && timeline && <TurnProcess timeline={timeline} live={live} />}
+                  {body && (
+                    <div className="body">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+                    </div>
+                  )}
+                  <TurnImages imagePaths={extra?.imagePaths ?? []} loadImage={loadImage} />
+                  <VisualizationList items={turnViz} />
+                  {/* 来源与时间：只对「谁发的」有意义，助手回合省掉来源标签 */}
+                  {hasMeta && turnMeta && (
+                    <div className="turn-meta">
+                      {turnMeta.model && <span className="tm-model">{turnMeta.model}</span>}
+                      {turnMeta.sourceLabel && <span className="tm-src">{turnMeta.sourceLabel}</span>}
+                      {turnMeta.clock && <span className="tm-clock">{turnMeta.clock}</span>}
+                      {turnMeta.usageText && (
+                        <span className="tm-usage" title={turnMeta.usageDetail}>{turnMeta.usageText}</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </React.Fragment>
             )
           })}
-          {/* 回合窗口之外的图表：工具行没加载（分页没覆盖到）时仍要能看见，否则图表会凭空消失 */}
-          {orphanVisualizations.length > 0 && (
-            <div className="turn assistant">
-              <VisualizationList items={orphanVisualizations} />
+          {/* 只有确实比所有回合都新的图表才放在末尾 */}
+          {(vizSlots.get(turns.length) ?? []).length > 0 && (
+            <div className="turn assistant viz-orphan">
+              {/* 这类图表比所有已加载回合都新（本轮刚生成、工具行还没到），不标「较早」 */}
+              <VisualizationList items={vizSlots.get(turns.length) ?? []} />
             </div>
           )}
           {sessionActive && (

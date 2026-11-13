@@ -468,3 +468,48 @@ export function VisualizationList({ items }: { items: VisualizationItem[] }): Re
     </div>
   )
 }
+
+/**
+ * 给「挂不回工具行」的图表找插入位置。
+ *
+ * 分页只保留消息尾部，所以挂不回去的图表几乎都属于**更早**的回合。
+ * 旧实现把它们统一追加到消息流末尾，结果一张很早的图出现在所有对话之后 ——
+ * 看起来就像图表自己「跑到了最下面」。这里按 createdAt 插到第一个不早于它的
+ * 回合之前；没有可用时间戳时一律退化到最前，绝不丢到最后。
+ *
+ * @param turnTimes 每个回合的时间戳（毫秒），下标与回合下标一致；无法取到的用 undefined
+ * @returns 插入位置（0..turnTimes.length）→ 该位置要插入的图表
+ */
+export function placeOrphanVisualizations(
+  orphans: readonly VisualizationItem[],
+  turnTimes: ReadonlyArray<number | undefined>,
+): Map<number, VisualizationItem[]> {
+  const slots = new Map<number, VisualizationItem[]>()
+  const push = (index: number, item: VisualizationItem): void => {
+    const bucket = slots.get(index)
+    if (bucket) bucket.push(item)
+    else slots.set(index, [item])
+  }
+  const hasUsableTimes = turnTimes.some((at) => typeof at === 'number' && Number.isFinite(at) && at > 0)
+
+  for (const item of orphans) {
+    const createdAt = typeof item.createdAt === 'number' && Number.isFinite(item.createdAt)
+      ? item.createdAt
+      : 0
+    if (!hasUsableTimes || createdAt <= 0) {
+      // 拿不到时间就当它属于尚未加载的早期回合
+      push(0, item)
+      continue
+    }
+    let insertAt = turnTimes.length
+    for (let index = 0; index < turnTimes.length; index++) {
+      const at = turnTimes[index]
+      if (typeof at !== 'number' || !Number.isFinite(at) || at <= 0) continue
+      if (at >= createdAt) { insertAt = index; break }
+    }
+    push(insertAt, item)
+  }
+
+  for (const bucket of slots.values()) bucket.sort((a, b) => a.createdAt - b.createdAt)
+  return slots
+}

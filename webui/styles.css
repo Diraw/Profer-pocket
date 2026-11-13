@@ -849,6 +849,13 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 
 /* ===== 会话内可视化（原生图表） ===== */
 /* 与消息列同宽的内容面：细边线 + 极轻投影，和图片卡同一层级 */
+/* 早期图表：工具行尚未加载，按时间补在两段对话之间，用一行小标题说明它不是旁边这轮的内容 */
+.viz-orphan-label {
+  margin-bottom: 6px;
+  color: #7d7a75;
+  font-size: 10.5px;
+  letter-spacing: .02em;
+}
 .viz-list { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-3); }
 .viz-card {
   min-width: 0;
