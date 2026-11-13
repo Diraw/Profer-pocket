@@ -425,6 +425,78 @@ body {
 /* 输入条在有待确认卡片时降低存在感：这不是当前该做的事 */
 .composer-pill.blocked { border-color: var(--warning-container); background: var(--surface-low); box-shadow: none; }
 
+/* ===== 附件：输入框上方的待发列表 + 左侧回形针 ===== */
+.attach-input { display: none; }
+/* 附件条横向滚动、不换行：多选十个文件时不能把输入框顶出屏幕 */
+.attach-bar {
+  display: flex;
+  gap: var(--sp-2);
+  margin: 0 4px var(--sp-2);
+  padding-bottom: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.attach-bar::-webkit-scrollbar { display: none; }
+.attach-chip {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 78vw;
+  padding: 5px 6px 5px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-pill);
+  background: var(--surface-low);
+  color: var(--muted);
+  font-size: 11.5px;
+}
+/* 上传中用虚线：与「已就绪」的形状区别开，不靠颜色说话 */
+.attach-chip.uploading { border-style: dashed; }
+.attach-chip.error { border-color: var(--error-container); background: var(--error-container); color: var(--on-error-container); }
+.attach-name {
+  max-width: 44vw;
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attach-chip.error .attach-name { color: inherit; }
+.attach-size { flex: none; opacity: .78; }
+.attach-remove {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+}
+.attach-remove:hover:not(:disabled) { background: var(--surface-high); border-color: transparent; }
+/* 回形针与发送键同高：输入条两端各一个动作，位置上对称 */
+.attach-btn {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+.attach-btn:hover:not(:disabled) { background: var(--surface); border-color: transparent; color: var(--ink); }
+.attach-btn:disabled { opacity: .4; cursor: not-allowed; }
+
 /* 40px 圆键：空输入是淡底 + 弱前景，有字/运行中是实心主色 */
 .send-btn {
   flex: none;

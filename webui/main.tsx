@@ -19,6 +19,7 @@ import { TurnProcess } from './turn-process'
 import { buildAssistantTimeline } from './turn-timeline'
 import { OLDER_PAGE, decodeMessagePage, mergePrepend, tailPageSize } from './message-page'
 import { applyPageTitle } from './page-title'
+import { base64FromDataUrl, formatBytes, resolveSendText, validateAttachmentFile } from './attachments'
 import { GoalBar, GoalLauncher, normalizeGoal, type GoalAction, type GoalState } from './goal'
 import { VisualizationList, normalizeVisualizations, type VisualizationItem } from './visualization'
 import { WsClient, defaultWsUrl } from '../src/renderer/pocket/ws-client'
@@ -51,6 +52,21 @@ interface SessionMeta {
   modelId?: string
   workspaceId?: string
   permissionMode?: SendPermissionMode
+}
+
+/**
+ * 待发送附件。
+ *
+ * `filename` 用**服务端返回的名字**：同名文件会被加序号（a.png → a-1.png），
+ * 拿本地原名回填会在发送时解析不到。失败项留在列表里而不是弹走 ——
+ * 用户需要看到是哪个文件、为什么被拒。
+ */
+interface StagedAttachment {
+  key: string
+  filename: string
+  size: number
+  status: 'uploading' | 'ready' | 'error'
+  error?: string
 }
 
 declare global {
@@ -145,11 +161,15 @@ function App(): React.ReactElement {
   const [goalProposals, setGoalProposals] = React.useState<GoalProposalItem[]>([])
   const [goal, setGoal] = React.useState<GoalState | null>(null)
   const [visualizations, setVisualizations] = React.useState<VisualizationItem[]>([])
+  const [attachments, setAttachments] = React.useState<StagedAttachment[]>([])
   const [modeMenuOpen, setModeMenuOpen] = React.useState(false)
   const [switchingMode, setSwitchingMode] = React.useState(false)
   const clientRef = React.useRef<WsClient | null>(null)
   const scrollRef = React.useRef<HTMLDivElement | null>(null)
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null)
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null)
+  /** 上传回调里要读当前列表（闭包拿不到最新 state），与 heldRef 同一手法。 */
+  const attachmentsRef = React.useRef<StagedAttachment[]>([])
   const lastCompletedRef = React.useRef(0)
   /** 是否贴着底部。用户上滑阅读时不跟随新内容，只露出「回到最新」。 */
   const atBottomRef = React.useRef(true)
@@ -212,6 +232,7 @@ function App(): React.ReactElement {
 
   // 让 reload 读到「当前持有条数」，同时避免把它塞进回调依赖 —— 否则每条消息都会重建连接 effect。
   React.useEffect(() => { heldRef.current = messages.length }, [messages])
+  React.useEffect(() => { attachmentsRef.current = attachments }, [attachments])
 
   /** 前置拼接后按距底距离还原滚动位置，否则视口会跳掉一大截。 */
   React.useLayoutEffect(() => {
@@ -656,10 +677,77 @@ function App(): React.ReactElement {
     }
   }, [sessionId, switchingMode, meta])
 
-  const send = async (): Promise<void> => {
-    const text = input.trim()
+  /** 附件：ready 的才随消息发出，uploading 或 error 的都挡在发送之前。 */
+  const readyAttachments = attachments.filter((item) => item.status === 'ready')
+  const uploadingAttachments = attachments.some((item) => item.status === 'uploading')
+  /** 有正文或已就绪附件就能发；上传中不许发（否则会发出一条缺文件的消息）。 */
+  const canSend = Boolean(
+    (input.trim() || readyAttachments.length > 0) && connected && !busy && !hasPending && !uploadingAttachments,
+  )
+
+  const pickFiles = (files: FileList | null): void => {
+    if (!files || files.length === 0) return
     const client = clientRef.current
-    if (!text || busy || !client) return
+    if (!client || !connected) {
+      setNotice('连接未就绪，暂时无法上传附件')
+      return
+    }
+    for (const file of Array.from(files)) {
+      const staged = attachmentsRef.current.filter((item) => item.status !== 'error').length
+      const invalid = validateAttachmentFile(file, staged)
+      const key = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      if (invalid) {
+        // 放进列表而不是只弹一条 notice：用户要能看出是哪个文件被拒了
+        setAttachments((previous) => [...previous, {
+          key, filename: file.name || '未命名文件', size: file.size, status: 'error', error: invalid,
+        }])
+        continue
+      }
+      setAttachments((previous) => [...previous, {
+        key, filename: file.name, size: file.size, status: 'uploading',
+      }])
+      const reader = new FileReader()
+      reader.onerror = () => {
+        setAttachments((previous) => previous.map((item) => (item.key === key
+          ? { ...item, status: 'error', error: '读取文件失败' }
+          : item)))
+      }
+      reader.onload = () => {
+        const base64 = base64FromDataUrl(String(reader.result ?? ''))
+        if (!base64) {
+          setAttachments((previous) => previous.map((item) => (item.key === key
+            ? { ...item, status: 'error', error: '文件内容为空' }
+            : item)))
+          return
+        }
+        void client.saveAgentAttachment(sessionId, file.name, base64)
+          .then((result) => {
+            const saved = result as { filename?: unknown } | null
+            const filename = typeof saved?.filename === 'string' && saved.filename ? saved.filename : file.name
+            setAttachments((previous) => previous.map((item) => (item.key === key
+              // 服务端遇到同名会加序号，必须记返回值里的文件名，否则发消息时解析不到
+              ? { ...item, status: 'ready', filename }
+              : item)))
+          })
+          .catch((error: unknown) => {
+            setAttachments((previous) => previous.map((item) => (item.key === key
+              ? { ...item, status: 'error', error: error instanceof Error ? error.message : '上传失败' }
+              : item)))
+          })
+      }
+      reader.readAsDataURL(file)
+    }
+  }
+
+  const send = async (): Promise<void> => {
+    const client = clientRef.current
+    if (busy || !client) return
+    if (uploadingAttachments) {
+      setNotice('附件还在上传，请稍候')
+      return
+    }
+    const text = resolveSendText(input, readyAttachments.length)
+    if (!text) return
     if (!meta?.channelId) {
       setNotice('尚未取到会话渠道信息，请稍候或刷新页面')
       return
@@ -675,11 +763,16 @@ function App(): React.ReactElement {
         modelId: meta.modelId,
         workspaceId: meta.workspaceId,
         permissionMode: meta.permissionMode ?? 'bypassPermissions',
+        ...(readyAttachments.length > 0
+          ? { attachments: readyAttachments.map((item) => ({ filename: item.filename })) }
+          : {}),
       })
       setInput('')
+      setAttachments([])
       setRunning(true)
       setNotice('')
     } catch (error) {
+      // 失败保留附件与文案：重试时不该让用户重新挑一遍文件
       setNotice(`发送失败：${error instanceof Error ? error.message : String(error)}`)
     } finally {
       setBusy(false)
@@ -831,7 +924,47 @@ function App(): React.ReactElement {
         </div>
       )}
       <div className="composer">
+        {/* 附件条在输入框之上：它是「这一条消息的组成」，不是输入框的一部分 */}
+        {attachments.length > 0 && (
+          <div className="attach-bar">
+            {attachments.map((item) => (
+              <div className={`attach-chip ${item.status}`} key={item.key} title={item.error ?? item.filename}>
+                <span className="attach-name">{item.filename}</span>
+                <span className="attach-size">
+                  {item.status === 'uploading' ? '上传中…' : item.status === 'error' ? item.error : formatBytes(item.size)}
+                </span>
+                <button
+                  className="attach-remove"
+                  onClick={() => setAttachments((previous) => previous.filter((entry) => entry.key !== item.key))}
+                  aria-label={`移除附件 ${item.filename}`}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <input
+          ref={fileInputRef}
+          className="attach-input"
+          type="file"
+          multiple
+          onChange={(event) => {
+            pickFiles(event.target.files)
+            // 清空 value：同一个文件连选两次也要能触发 change
+            event.target.value = ''
+          }}
+        />
         <div className={`composer-pill ${hasPending ? 'blocked' : ''}`}>
+          <button
+            className="attach-btn"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={hasPending || !connected}
+            title="添加附件"
+            aria-label="添加附件"
+          >
+            +
+          </button>
           <textarea
             ref={inputRef}
             rows={1}
@@ -842,6 +975,13 @@ function App(): React.ReactElement {
               : PREFER_SEND_BUTTON ? '发送消息…' : '发送消息…（Enter 发送，Shift+Enter 换行）'}
             enterKeyHint={PREFER_SEND_BUTTON ? 'enter' : 'send'}
             onChange={(event) => setInput(event.target.value)}
+            onPaste={(event) => {
+              // 截图/文件直接粘贴：桌面端最顺手的上传方式，不接反而显得「网页版少一块」
+              const files = event.clipboardData?.files
+              if (!files || files.length === 0) return
+              event.preventDefault()
+              pickFiles(files)
+            }}
             onKeyDown={(event) => {
               // 触屏上 Enter 留给换行，发送一律走右侧圆键（换行后再按 Enter 也不会误发）。
               if (PREFER_SEND_BUTTON) return
@@ -851,15 +991,15 @@ function App(): React.ReactElement {
               void send()
             }}
           />
-          {/* 一个位置一个主动作：有字是发送，运行中且没字是停止 */}
-          {running && !input.trim() ? (
+          {/* 一个位置一个主动作：能发就是发送，运行中且没内容才是停止 */}
+          {running && !input.trim() && readyAttachments.length === 0 ? (
             <button className="send-btn run" onClick={() => void stop()} title="停止本轮运行">■</button>
           ) : (
             <button
-              className={`send-btn ${input.trim() && connected && !busy && !hasPending ? 'ready' : ''}`}
-              disabled={!input.trim() || !connected || busy || hasPending}
+              className={`send-btn ${canSend ? 'ready' : ''}`}
+              disabled={!canSend}
               onClick={() => void send()}
-              title="发送（Enter）"
+              title={uploadingAttachments ? '附件上传中' : '发送（Enter）'}
             >
               {busy ? '…' : '↑'}
             </button>

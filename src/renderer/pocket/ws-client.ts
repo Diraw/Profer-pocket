@@ -789,12 +789,37 @@ export class WsClient {
     return this.sendCommand({ type: 'ensure_project_draft_session', ...payload })
   }
 
-  sendMessage(payload: { sessionId: string; userMessage: string; channelId: string; modelId?: string; workspaceId?: string; permissionMode?: 'auto' | 'plan' | 'bypassPermissions'; uuid?: string; startedAt?: number; additionalDirectories?: string[] }): Promise<unknown> {
+  sendMessage(payload: {
+    sessionId: string
+    userMessage: string
+    channelId: string
+    modelId?: string
+    workspaceId?: string
+    permissionMode?: 'auto' | 'plan' | 'bypassPermissions'
+    uuid?: string
+    startedAt?: number
+    additionalDirectories?: string[]
+    /**
+     * 本轮的附件：只传文件名（先经 `saveAgentAttachment` 落到会话 cwd），
+     * 绝对路径由主进程拼出来并校验 —— 不接受客户端传路径。
+     */
+    attachments?: Array<{ filename: string; label?: string }>
+  }): Promise<unknown> {
     // 幂等去重键既要覆盖同一 WebView 的 WS 重连，也要覆盖“服务端已接收但 WebView
     // 被系统杀掉、未收到 accepted”的跨进程恢复窗口。
     const clientMessageId = claimPendingSendId(payload, WsClient.newClientMessageId)
     const frame = { type: 'send_message', ...payload, clientMessageId }
     return this.queueMessageOrSend(frame)
+  }
+
+  /**
+   * 把附件写进会话工作目录（与桌面 saveFilesToAgentSession 同源）。
+   *
+   * 返回 `{ filename, path, size }`：`filename` 可能与原名不同（服务端会为同名文件加序号），
+   * 发消息时必须用返回值里的 `filename`，否则解析不到刚上传的文件。
+   */
+  saveAgentAttachment(sessionId: string, filename: string, base64: string): Promise<unknown> {
+    return this.sendCommand({ type: 'save_agent_attachment', sessionId, filename, base64 })
   }
 
   saveFilesToAgentSession(input: { workspaceSlug: string; sessionId: string; files: Array<{ filename: string; data: string }> }): Promise<unknown> {

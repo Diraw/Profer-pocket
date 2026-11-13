@@ -29,6 +29,7 @@
     "visualization.tsx",
     "message-page.ts",
     "page-title.ts",
+    "attachments.ts",
     "../src/renderer/pocket/ws-client.ts",
     "../src/renderer/pocket/sdk-message-slim.ts"
   ],
