@@ -664,6 +664,16 @@ export class WsClient {
   }
 
   /**
+   * 会话内可视化记录（原生图表 / HTML 片段）。
+   *
+   * 图表数据不在消息流里：WS 出口的投影把 tool_use 入参压成 `{ file_path }`，
+   * 所以只能按 `toolCallId` 从记录侧取，再挂回对应的工具调用行。
+   */
+  listVisualizations(sessionId: string): Promise<unknown> {
+    return this.sendCommand({ type: 'list_visualizations', sessionId })
+  }
+
+  /**
    * 获取活跃 Agent 会话的运行时上下文窗口快照（对齐桌面 remote-service `get_agent_runtime_contexts`）。
    *
    * `context_window` 是 run 启动时的瞬时事件，Pocket 晚连接/重连/切回会话时会错过它，

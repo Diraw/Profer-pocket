@@ -17,6 +17,7 @@ import { groupIntoTurns, toTranscript } from '@profer/session-core'
 import { TurnExtras, extractTurnExtras, stripContextBlocks, type ImageLoadResult } from './turn-extras'
 import { OLDER_PAGE, decodeMessagePage, mergePrepend, tailPageSize } from './message-page'
 import { GoalBar, GoalLauncher, normalizeGoal, type GoalAction, type GoalState } from './goal'
+import { VisualizationList, normalizeVisualizations, type VisualizationItem } from './visualization'
 import { WsClient, defaultWsUrl } from '../src/renderer/pocket/ws-client'
 import {
   InteractionCards,
@@ -140,6 +141,7 @@ function App(): React.ReactElement {
   const [exitPlans, setExitPlans] = React.useState<ExitPlanItem[]>([])
   const [goalProposals, setGoalProposals] = React.useState<GoalProposalItem[]>([])
   const [goal, setGoal] = React.useState<GoalState | null>(null)
+  const [visualizations, setVisualizations] = React.useState<VisualizationItem[]>([])
   const [modeMenuOpen, setModeMenuOpen] = React.useState(false)
   const [switchingMode, setSwitchingMode] = React.useState(false)
   const clientRef = React.useRef<WsClient | null>(null)
@@ -166,6 +168,21 @@ function App(): React.ReactElement {
   const hasCards = hasPending || goalProposals.length > 0
   const permissionMode = meta?.permissionMode ?? 'bypassPermissions'
   const currentMode = PERMISSION_MODES.find((entry) => entry.mode === permissionMode) ?? PERMISSION_MODES[1]!
+  /** 图表挂在工具调用行上，靠 toolCallId 关联（消息体里没有图表数据）。 */
+  const vizByTool = React.useMemo(() => {
+    const map = new Map<string, VisualizationItem>()
+    for (const item of visualizations) map.set(item.toolCallId, item)
+    return map
+  }, [visualizations])
+  /**
+   * 没有任何已加载回合引用到的图表。分页只取尾部，较早回合的工具行可能不在窗口里；
+   * 这时若直接丢弃，图表会凭空消失 —— 退到列表末尾集中展示，读起来也不割裂。
+   */
+  const orphanVisualizations = React.useMemo(() => {
+    const matched = new Set<string>()
+    for (const extra of extras) for (const tool of extra.tools) matched.add(tool.id)
+    return visualizations.filter((item) => !matched.has(item.toolCallId))
+  }, [extras, visualizations])
 
   // 菜单开着时能用 Esc 关掉，否则手机返回键/键盘都会觉得被卡住
   React.useEffect(() => {
@@ -260,8 +277,20 @@ function App(): React.ReactElement {
     }
   }, [sessionId])
 
-  /** 向上续页：只取更早的一页并前置拼接，不重拉尾部。 */
-  const loadOlder = React.useCallback(async (): Promise<void> => {
+  /**
+   * 会话内可视化记录：图表数据不在消息流里（WS 投影把 tool_use 入参压成 `{ file_path }`），
+   * 只能按会话整体列出，再靠 `toolCallId` 挂回对应回合的工具调用行。
+   */
+  const loadVisualizations = React.useCallback(async (client: WsClient): Promise<void> => {
+    try {
+      const result = await client.listVisualizations(sessionId) as { records?: unknown } | null
+      setVisualizations(normalizeVisualizations(result?.records))
+    } catch {
+      // 旧服务端不认这条命令时也走这里：图表缺失不该拦住消息阅读
+    }
+  }, [sessionId])
+
+  /** 向上续页：只取更早的一页并前置拼接，不重拉尾部。 */  const loadOlder = React.useCallback(async (): Promise<void> => {
     const client = clientRef.current
     if (!client || loadingOlder || !hasOlder || pageStart <= 0) return
     const node = scrollRef.current
@@ -343,6 +372,7 @@ function App(): React.ReactElement {
             proposal?: unknown
             proposalId?: string
             mode?: unknown
+            record?: unknown
           }
         } | null
         if (payload?.kind === 'sdk_message' && payload.message) {
@@ -391,6 +421,14 @@ function App(): React.ReactElement {
           // 下一次发送仍带着 permissionMode:'plan' 这个 override，会立刻又进回计划模式。
           const mode = normalizePermissionMode(proferEvent?.mode)
           setMeta((previous) => (previous ? { ...previous, permissionMode: mode } : previous))
+        } else if (type === 'visualization_updated' && proferEvent?.record) {
+          // 主进程每次写入记录都会推一条完整 record：按 toolCallId 覆盖，不重新拉列表。
+          const item = normalizeVisualizations([proferEvent.record])[0]
+          if (item) {
+            setVisualizations((previous) => previous.some((entry) => entry.id === item.id)
+              ? previous.map((entry) => (entry.id === item.id ? item : entry))
+              : [...previous, item])
+          }
         }
         // run_completed 与 run_idle 会在同一轮先后到达，3 秒内只收敛一次。
         if (type === 'run_completed' || type === 'run_idle') {
@@ -400,6 +438,7 @@ function App(): React.ReactElement {
             setRunning(false)
             void reload(client)
             void loadGoal(client)
+            void loadVisualizations(client)
           }
         }
       },
@@ -436,6 +475,7 @@ function App(): React.ReactElement {
       await reload(client)
       await loadInteractions(client)
       await loadGoal(client)
+      await loadVisualizations(client)
     })()
     return () => {
       cancelled = true
@@ -443,7 +483,7 @@ function App(): React.ReactElement {
       client.disconnect()
       clientRef.current = null
     }
-  }, [sessionId, token, reload, loadInteractions, loadGoal])
+  }, [sessionId, token, reload, loadInteractions, loadGoal, loadVisualizations])
 
   const respondPermission = React.useCallback(async (
     requestId: string,
@@ -712,6 +752,10 @@ function App(): React.ReactElement {
           ) : turns.map((turn) => {
             const text = stripContextBlocks(turn.text)
             const extra = extras[turn.index]
+            // 图表按 toolCallId 挂回回合：tool_use 的 id 在 WS 投影里是保留的，这是唯一可靠的连接键。
+            const turnViz = (extra?.tools ?? [])
+              .map((tool) => vizByTool.get(tool.id))
+              .filter((item): item is VisualizationItem => Boolean(item))
             return (
               <div className={`turn ${turn.role === 'user' ? 'user' : 'assistant'}`} key={turn.index}>
                 {text && (
@@ -720,9 +764,16 @@ function App(): React.ReactElement {
                   </div>
                 )}
                 <TurnExtras tools={extra?.tools ?? []} imagePaths={extra?.imagePaths ?? []} loadImage={loadImage} />
+                <VisualizationList items={turnViz} />
               </div>
             )
           })}
+          {/* 回合窗口之外的图表：工具行没加载（分页没覆盖到）时仍要能看见，否则图表会凭空消失 */}
+          {orphanVisualizations.length > 0 && (
+            <div className="turn assistant">
+              <VisualizationList items={orphanVisualizations} />
+            </div>
+          )}
           {running && (
             <div className="running-hint">Profer 正在处理</div>
           )}
