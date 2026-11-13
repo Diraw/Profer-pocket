@@ -14,7 +14,9 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { SDKMessage } from '@profer/shared'
 import { groupIntoTurns, toTranscript } from '@profer/session-core'
-import { TurnExtras, extractTurnExtras, stripContextBlocks, type ImageLoadResult } from './turn-extras'
+import { TurnImages, extractTurnExtras, stripContextBlocks, type ImageLoadResult } from './turn-extras'
+import { TurnProcess } from './turn-process'
+import { buildAssistantTimeline } from './turn-timeline'
 import { OLDER_PAGE, decodeMessagePage, mergePrepend, tailPageSize } from './message-page'
 import { GoalBar, GoalLauncher, normalizeGoal, type GoalAction, type GoalState } from './goal'
 import { VisualizationList, normalizeVisualizations, type VisualizationItem } from './visualization'
@@ -163,6 +165,8 @@ function App(): React.ReactElement {
   const groups = React.useMemo(() => groupIntoTurns(messages), [messages])
   const turns = React.useMemo(() => toTranscript(groups), [groups])
   const extras = React.useMemo(() => groups.map(extractTurnExtras), [groups])
+  /** 过程时间线：把每轮拆成「最终正文 + 交织的叙述/工具/思考」。 */
+  const timelines = React.useMemo(() => groups.map(buildAssistantTimeline), [groups])
   const hasPending = permissions.length + askUsers.length + exitPlans.length > 0
   /** 提议不阻塞运行，所以只影响「是否渲染卡片区」，不锁输入框。 */
   const hasCards = hasPending || goalProposals.length > 0
@@ -180,9 +184,13 @@ function App(): React.ReactElement {
    */
   const orphanVisualizations = React.useMemo(() => {
     const matched = new Set<string>()
-    for (const extra of extras) for (const tool of extra.tools) matched.add(tool.id)
+    for (const timeline of timelines) {
+      for (const item of timeline.items) {
+        if (item.kind === 'tool') matched.add(item.tool.id)
+      }
+    }
     return visualizations.filter((item) => !matched.has(item.toolCallId))
-  }, [extras, visualizations])
+  }, [timelines, visualizations])
 
   // 菜单开着时能用 Esc 关掉，否则手机返回键/键盘都会觉得被卡住
   React.useEffect(() => {
@@ -750,20 +758,25 @@ function App(): React.ReactElement {
               )}
             </div>
           ) : turns.map((turn) => {
-            const text = stripContextBlocks(turn.text)
             const extra = extras[turn.index]
+            const timeline = timelines[turn.index]
+            const isAssistant = turn.role === 'assistant'
+            // 过程条目挂在组里，正文只留「最终答复」——两段分开取，避免正文被折叠进执行过程
+            const body = stripContextBlocks(isAssistant ? (timeline?.headline ?? '') : turn.text)
             // 图表按 toolCallId 挂回回合：tool_use 的 id 在 WS 投影里是保留的，这是唯一可靠的连接键。
-            const turnViz = (extra?.tools ?? [])
-              .map((tool) => vizByTool.get(tool.id))
+            const turnViz = (timeline?.items ?? [])
+              .flatMap((item) => (item.kind === 'tool' ? [vizByTool.get(item.tool.id)] : []))
               .filter((item): item is VisualizationItem => Boolean(item))
+            const live = running && turn.index === turns.length - 1
             return (
               <div className={`turn ${turn.role === 'user' ? 'user' : 'assistant'}`} key={turn.index}>
-                {text && (
+                {isAssistant && timeline && <TurnProcess timeline={timeline} live={live} />}
+                {body && (
                   <div className="body">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
                   </div>
                 )}
-                <TurnExtras tools={extra?.tools ?? []} imagePaths={extra?.imagePaths ?? []} loadImage={loadImage} />
+                <TurnImages imagePaths={extra?.imagePaths ?? []} loadImage={loadImage} />
                 <VisualizationList items={turnViz} />
               </div>
             )

@@ -23,6 +23,8 @@
     "main.tsx",
     "interactions.tsx",
     "turn-extras.tsx",
+    "turn-timeline.ts",
+    "turn-process.tsx",
     "goal.tsx",
     "visualization.tsx",
     "message-page.ts",

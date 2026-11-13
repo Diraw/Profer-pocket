@@ -266,55 +266,21 @@ function TurnImage({ path, loadImage }: {
   return <div className="turn-image placeholder">{`正在加载图片：${name}…`}</div>
 }
 
-export function TurnExtras({ tools, imagePaths, loadImage }: {
-  tools: ToolCall[]
+/**
+ * 回合里的图片：工具行已由 `TurnProcess` 的时间线接管，
+ * 这里只负责把图片按路径拉成 data URL 并排开。
+ */
+export function TurnImages({ imagePaths, loadImage }: {
   imagePaths: string[]
   loadImage: (path: string) => Promise<ImageLoadResult>
 }): React.ReactElement | null {
-  const [expanded, setExpanded] = React.useState(false)
-  if (tools.length === 0 && imagePaths.length === 0) return null
+  if (imagePaths.length === 0) return null
 
   return (
-    <div className="turn-extras">
-      {imagePaths.length > 0 && (
-        <div className="turn-images">
-          {imagePaths.map((path, index) => (
-            <TurnImage key={`${path}-${index}`} path={path} loadImage={loadImage} />
-          ))}
-        </div>
-      )}
-      {tools.length > 0 && (
-        <div className="tool-block">
-          <button
-            className="disclosure"
-            onClick={() => setExpanded((previous) => !previous)}
-            aria-expanded={expanded}
-          >
-            <span className="disclosure-icon" aria-hidden="true">{tools.length}</span>
-            <span className="disclosure-label">
-              执行过程{imagePaths.length > 0 ? ` · ${imagePaths.length} 张图片` : ''}
-            </span>
-            <span className={`chev ${expanded ? 'open' : ''}`} aria-hidden="true">›</span>
-          </button>
-          {expanded && (
-            <div className="tool-list">
-              {tools.map((tool, index) => (
-                <div
-                  className={`tool-row ${tool.failed ? 'failed' : ''}`}
-                  key={`${tool.id}-${index}`}
-                  title={`${tool.name}${tool.detail ? ` ${tool.detail}` : ''}`}
-                >
-                  <span className="tool-title">
-                    <span className="tool-name">{tool.name}</span>
-                    {tool.failed && <span className="tool-flag">失败</span>}
-                  </span>
-                  {tool.detail && <span className="tool-detail">{tool.detail}</span>}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+    <div className="turn-images">
+      {imagePaths.map((path, index) => (
+        <TurnImage key={`${path}-${index}`} path={path} loadImage={loadImage} />
+      ))}
     </div>
   )
 }
