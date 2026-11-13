@@ -17,6 +17,15 @@ import { groupIntoTurns, toTranscript } from '@profer/session-core'
 import { TurnImages, extractTurnExtras, stripContextBlocks, type ImageLoadResult } from './turn-extras'
 import { TurnProcess } from './turn-process'
 import { buildAssistantTimeline, isTurnFinished } from './turn-timeline'
+import {
+  SOURCE_LABELS,
+  describeUsage,
+  describeUsageDetail,
+  formatClock,
+  resolveTurnSource,
+  resolveTurnTime,
+  sumTurnUsage,
+} from './turn-meta'
 import { OLDER_PAGE, decodeMessagePage, mergePrepend, tailPageSize } from './message-page'
 import { applyPageTitle } from './page-title'
 import { base64FromDataUrl, formatBytes, resolveSendText, validateAttachmentFile } from './attachments'
@@ -234,6 +243,22 @@ function App(): React.ReactElement {
     return false
   }, [groups])
   const sessionActive = running && !lastTurnFinished
+  /**
+   * 每轮的「时间 / 来源 / token」。
+   *
+   * 一起算进同一个 memo：三者都只依赖分组，拆成三个 memo 只会让每帧多跑两遍 map。
+   * 时钟字符串在这里定稿（`Date.now()` 只在重算时取一次），避免每条消息各算各的。
+   */
+  const turnMetas = React.useMemo(() => groups.map((group) => {
+    const usage = sumTurnUsage(group)
+    const source = resolveTurnSource(group)
+    return {
+      clock: formatClock(resolveTurnTime(group)),
+      sourceLabel: source ? SOURCE_LABELS[source] : '',
+      usageText: usage ? describeUsage(usage) : '',
+      usageDetail: usage ? describeUsageDetail(usage) : '',
+    }
+  }), [groups])
   const hasPending = permissions.length + askUsers.length + exitPlans.length > 0
   /** 提议不阻塞运行，所以只影响「是否渲染卡片区」，不锁输入框。 */
   const hasCards = hasPending || goalProposals.length > 0
@@ -826,6 +851,8 @@ function App(): React.ReactElement {
         modelId: meta.modelId,
         workspaceId: meta.workspaceId,
         permissionMode: meta.permissionMode ?? 'bypassPermissions',
+        // 让主进程把这条消息标成「网页发的」，桌面端与手机上都能看出处
+        clientKind: 'webui',
         ...(readyAttachments.length > 0
           ? { attachments: readyAttachments.map((item) => ({ filename: item.filename })) }
           : {}),
@@ -951,6 +978,8 @@ function App(): React.ReactElement {
             // 过程组只在「这一轮还在跑」时自动展开：running 可能被迟到的收尾消息顶住，
             // 所以再叠一道数据判据，跑完的轮次一律收起，正文才能露出来。
             const live = sessionActive && turn.index === turns.length - 1
+            const turnMeta = turnMetas[turn.index]
+            const hasMeta = Boolean(turnMeta && (turnMeta.clock || turnMeta.sourceLabel || turnMeta.usageText))
             return (
               <div className={`turn ${turn.role === 'user' ? 'user' : 'assistant'}`} key={turn.index}>
                 {isAssistant && timeline && <TurnProcess timeline={timeline} live={live} />}
@@ -961,6 +990,16 @@ function App(): React.ReactElement {
                 )}
                 <TurnImages imagePaths={extra?.imagePaths ?? []} loadImage={loadImage} />
                 <VisualizationList items={turnViz} />
+                {/* 来源与时间：只对「谁发的」有意义，助手回合省掉来源标签 */}
+                {hasMeta && turnMeta && (
+                  <div className="turn-meta">
+                    {turnMeta.sourceLabel && <span className="tm-src">{turnMeta.sourceLabel}</span>}
+                    {turnMeta.clock && <span className="tm-clock">{turnMeta.clock}</span>}
+                    {turnMeta.usageText && (
+                      <span className="tm-usage" title={turnMeta.usageDetail}>{turnMeta.usageText}</span>
+                    )}
+                  </div>
+                )}
               </div>
             )
           })}

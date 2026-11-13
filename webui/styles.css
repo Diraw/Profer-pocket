@@ -245,6 +245,23 @@ body {
 /* 助手消息：通栏无气泡，长文优先 */
 .turn.assistant .body { padding: 2px 0; }
 
+/* 回合元信息：来源 · 时间 · token。11px 小字，不抢正文；数字等宽避免跳动 */
+.turn-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.turn.user .turn-meta { justify-content: flex-end; }
+/* 用低对比度圆点分隔，比竖线更轻 */
+.turn-meta > * + *::before { content: '·'; margin-right: 6px; opacity: .5; }
+.tm-src { color: var(--primary); }
+.tm-usage { letter-spacing: .2px; }
+
 .body { min-width: 0; font-size: 15px; line-height: 1.62; overflow-wrap: anywhere; }
 .body > :first-child { margin-top: 0; }
 .body > :last-child { margin-bottom: 0; }

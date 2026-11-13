@@ -25,6 +25,7 @@
     "turn-extras.tsx",
     "turn-timeline.ts",
     "turn-process.tsx",
+    "turn-meta.ts",
     "goal.tsx",
     "visualization.tsx",
     "message-page.ts",

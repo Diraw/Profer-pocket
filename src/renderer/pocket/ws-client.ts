@@ -836,6 +836,11 @@ export class WsClient {
      * 绝对路径由主进程拼出来并校验 —— 不接受客户端传路径。
      */
     attachments?: Array<{ filename: string; label?: string }>
+    /**
+     * 客户端类型，只用于给消息打「来源」标签（网页 / 远程）。
+     * 主进程按白名单取值，不参与任何鉴权判断。
+     */
+    clientKind?: 'webui' | 'remote'
   }): Promise<unknown> {
     // 幂等去重键既要覆盖同一 WebView 的 WS 重连，也要覆盖“服务端已接收但 WebView
     // 被系统杀掉、未收到 accepted”的跨进程恢复窗口。
