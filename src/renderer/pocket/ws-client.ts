@@ -91,17 +91,37 @@ const PENDING_SEND_LEDGER_TTL_MS = 2 * 60 * 1000
 
 type PendingSendLedger = { clientMessageId: string; expiresAt: number }
 
-function pendingSendLedgerKey(payload: { sessionId: string; userMessage: string; channelId: string; modelId?: string; workspaceId?: string }): string {
+/**
+ * 参与幂等键的字段。
+ *
+ * `attachments` 必须计入：同一句正文配上不同附件是**两条不同的消息**，
+ * 若只按正文取键，前一条还没确认时再发一条正文相同、附件不同的消息，
+ * 会被判成同一请求而复用旧 clientMessageId，服务端直接去重丢掉 —— 静默丢消息。
+ */
+type PendingSendKeyInput = {
+  sessionId: string
+  userMessage: string
+  channelId: string
+  modelId?: string
+  workspaceId?: string
+  attachments?: Array<{ filename: string }>
+}
+
+function pendingSendLedgerKey(payload: PendingSendKeyInput): string {
+  const attachments = Array.isArray(payload.attachments)
+    ? payload.attachments.map((item) => (item && typeof item.filename === 'string' ? item.filename : '')).join(',')
+    : ''
   return `${PENDING_SEND_LEDGER_PREFIX}${stableHash([
     payload.sessionId,
     payload.userMessage,
     payload.channelId,
     payload.modelId ?? '',
     payload.workspaceId ?? '',
+    attachments,
   ].join('\u0000'))}`
 }
 
-function claimPendingSendId(payload: { sessionId: string; userMessage: string; channelId: string; modelId?: string; workspaceId?: string }, createId: () => string): string {
+function claimPendingSendId(payload: PendingSendKeyInput, createId: () => string): string {
   const key = pendingSendLedgerKey(payload)
   const now = Date.now()
   try {
@@ -117,7 +137,7 @@ function claimPendingSendId(payload: { sessionId: string; userMessage: string; c
   }
 }
 
-function settlePendingSendId(payload: { sessionId: string; userMessage: string; channelId: string; modelId?: string; workspaceId?: string }, clientMessageId: string): void {
+function settlePendingSendId(payload: PendingSendKeyInput, clientMessageId: string): void {
   const key = pendingSendLedgerKey(payload)
   try {
     const current = JSON.parse(localStorage.getItem(key) ?? 'null') as PendingSendLedger | null
@@ -125,6 +145,18 @@ function settlePendingSendId(payload: { sessionId: string; userMessage: string; 
   } catch {
     /* localStorage 不可用时仅失去跨进程重试去重，不影响本次发送。 */
   }
+}
+
+/** 从出站帧里取出附件文件名（结算幂等键时用，必须与 claim 时口径一致）。 */
+function frameAttachmentNames(value: unknown): Array<{ filename: string }> {
+  if (!Array.isArray(value)) return []
+  const names: Array<{ filename: string }> = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue
+    const filename = (item as { filename?: unknown }).filename
+    if (typeof filename === 'string' && filename) names.push({ filename })
+  }
+  return names
 }
 
 type CommandResultMessage = CommandResult<unknown> & {
@@ -859,17 +891,21 @@ export class WsClient {
     reject: (e: Error) => void,
   ): void {
     const clientMessageId = String(frame.clientMessageId ?? '')
+    // 结算用的键必须与 claim 时口径完全一致（含附件文件名）。若漏掉附件，
+    // 键不一致 → 账本条目清不掉 → 2 分钟内重发同样内容会被当成重复请求丢掉。
+    const keyInput: PendingSendKeyInput = {
+      sessionId: String(frame.sessionId ?? ''),
+      userMessage: String(frame.userMessage ?? ''),
+      channelId: String(frame.channelId ?? ''),
+      modelId: typeof frame.modelId === 'string' ? frame.modelId : undefined,
+      workspaceId: typeof frame.workspaceId === 'string' ? frame.workspaceId : undefined,
+      attachments: frameAttachmentNames(frame.attachments),
+    }
     // 走 sendCommand 的内部追踪；服务端收到即回 command_result（send_message 是 fire-and-forget，
     // 立即返回 accepted，不等待 run 结束）。成功即从「待确认」中移除。
     this.sendCommand(frame).then(
       (r) => {
-        settlePendingSendId({
-          sessionId: String(frame.sessionId ?? ''),
-          userMessage: String(frame.userMessage ?? ''),
-          channelId: String(frame.channelId ?? ''),
-          modelId: typeof frame.modelId === 'string' ? frame.modelId : undefined,
-          workspaceId: typeof frame.workspaceId === 'string' ? frame.workspaceId : undefined,
-        }, clientMessageId)
+        settlePendingSendId(keyInput, clientMessageId)
         resolve(r)
       },
       (err: Error) => {
@@ -878,13 +914,7 @@ export class WsClient {
         if (isTransientConnectionError(err)) {
           this.outgoingQueue.push({ payload: frame, clientMessageId, resolve, reject })
         } else {
-          settlePendingSendId({
-            sessionId: String(frame.sessionId ?? ''),
-            userMessage: String(frame.userMessage ?? ''),
-            channelId: String(frame.channelId ?? ''),
-            modelId: typeof frame.modelId === 'string' ? frame.modelId : undefined,
-            workspaceId: typeof frame.workspaceId === 'string' ? frame.workspaceId : undefined,
-          }, clientMessageId)
+          settlePendingSendId(keyInput, clientMessageId)
           reject(err)
         }
       },
