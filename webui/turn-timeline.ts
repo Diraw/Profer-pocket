@@ -152,7 +152,40 @@ export function isTurnSettled(
  * 两遍扫描：先收工具结果（决定 done / failed），再按原始顺序排块 ——
  * tool_result 与 tool_use 可能落在不同消息里，一遍扫会在结果到达前就渲染成「进行中」。
  */
-export function buildAssistantTimeline(group: MessageGroup | undefined): AssistantTimeline {
+/**
+ * 这一轮是否「还在飞」：只看**最后一个**工具调用是否还没拿到结果。
+ *
+ * 中途（被中断、结果永不落盘）缺失结果的工具不算 pending —— 真实会话里，还在飞的工具
+ * 永远追加在末尾，丢失的结果只会出现在中间。用「末尾工具未完成」当 liveness 信号，既能
+ * 在跑完时正确收尾，也不会被一个早夭的中间工具卡住（`findHeadlineRange` 的严格分支就
+ * 是被这种缺失结果误伤的：WebUI 拿不到顶层 result，严格分支要求所有工具结果到齐，于是
+ * 整段最终正文被判成「还在过程里」而消失）。
+ */
+export function turnHasTrailingPendingTool(group: MessageGroup | undefined): boolean {
+  if (!group || group.type !== 'assistant-turn') return false
+  let lastToolId: string | null = null
+  const resultIds = new Set<string>()
+  for (const message of group.turnMessages) {
+    const content = (message as { message?: { content?: unknown } }).message?.content
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (!isRecord(block)) continue
+      if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+        resultIds.add(block.tool_use_id)
+      } else if (block.type === 'tool_use' && typeof block.id === 'string') {
+        lastToolId = block.id
+      }
+    }
+  }
+  return lastToolId !== null && !resultIds.has(lastToolId)
+}
+
+export function buildAssistantTimeline(
+  group: MessageGroup | undefined,
+  /** 这一轮是否已确定收尾。默认按顶层 result 判断；WebUI 拿不到 result，由调用方用
+   * 「末尾工具已收齐」等更可靠的数据信号传入，否则严格分支会藏起缺结果的轮次正文。 */
+  settled?: boolean,
+): AssistantTimeline {
   if (!group || group.type !== 'assistant-turn') return emptyTimeline()
   const resultIds = new Set<string>()
   const failedIds = new Set<string>()
@@ -203,7 +236,7 @@ export function buildAssistantTimeline(group: MessageGroup | undefined): Assista
     }
   }
 
-  const range = findHeadlineRange(items, isTurnFinished(group))
+  const range = findHeadlineRange(items, settled ?? isTurnFinished(group))
   const headline = range
     ? items.slice(range.start, range.end + 1)
       .map((item) => (item.kind === 'text' ? item.text : ''))

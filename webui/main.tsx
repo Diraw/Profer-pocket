@@ -13,10 +13,10 @@ import { createRoot } from 'react-dom/client'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { SDKMessage } from '@profer/shared'
-import { groupIntoTurns, toTranscript } from '@profer/session-core'
+import { groupIntoTurns, toTranscript, type MessageGroup } from '@profer/session-core'
 import { TurnAttachments, TurnImages, extractTurnExtras, stripContextBlocks, type ImageLoadResult } from './turn-extras'
 import { TurnProcess } from './turn-process'
-import { buildAssistantTimeline, isTurnSettled } from './turn-timeline'
+import { buildAssistantTimeline, isTurnSettled, turnHasTrailingPendingTool } from './turn-timeline'
 import {
   SOURCE_LABELS,
   describeUsage,
@@ -235,6 +235,10 @@ function App(): React.ReactElement {
   const [connected, setConnected] = React.useState(false)
   const [meta, setMeta] = React.useState<SessionMeta | null>(null)
   const [running, setRunning] = React.useState(false)
+  /** 给 WS 回调用的实时镜像：回调闭包在 effect 创建时定格，必须用 ref 拿最新值。 */
+  const runningRef = React.useRef(running)
+  runningRef.current = running
+  const groupsRef = React.useRef<MessageGroup[]>([])
   const [input, setInput] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [acting, setActing] = React.useState(false)
@@ -282,10 +286,38 @@ function App(): React.ReactElement {
 
   // session-core 的纯函数负责快照去重与 turn 分组，避免自己重抄一套口径。
   const groups = React.useMemo(() => groupIntoTurns(messages), [messages])
+  groupsRef.current = groups
   const turns = React.useMemo(() => toTranscript(groups), [groups])
   const extras = React.useMemo(() => groups.map(extractTurnExtras), [groups])
-  /** 过程时间线：把每轮拆成「最终正文 + 交织的叙述/工具/思考」。 */
-  const timelines = React.useMemo(() => groups.map(buildAssistantTimeline), [groups])
+  /**
+   * 最后一条非 system 回合的索引，以及它「末尾工具是否还在飞」。
+   * 这是 WebUI 上唯一可靠的「这一轮是否收尾」信号：服务端把顶层 result 过滤掉了，
+   * 严格分支要求所有工具结果到齐，会把缺结果（含被中断、结果永不落盘）的轮次正文藏起来。
+   * 末尾工具已收齐 → 这一轮就是完成的，正文该显示、过程组该收起。
+   */
+  const lastNonSystem = React.useMemo(() => {
+    let index = -1
+    let group: MessageGroup | undefined
+    for (let i = groups.length - 1; i >= 0; i--) {
+      const candidate = groups[i]
+      if (candidate && candidate.type !== 'system') { index = i; group = candidate; break }
+    }
+    return {
+      index,
+      pending: group?.type === 'assistant-turn' ? turnHasTrailingPendingTool(group) : false,
+    }
+  }, [groups])
+  /** 过程时间线：把每轮拆成「最终正文 + 交织的叙述/工具/思考」。
+   * 非末尾回合一律当已收尾（宽松）；末尾回合在「末尾工具还在飞」时才走严格分支，
+   * 否则也宽松 —— 这样缺结果/被中断的轮次正文不会被藏起来，手机重连把 running 顶成
+   * true 也不影响（settled 不依赖 running）。 */
+  const timelines = React.useMemo(
+    () => groups.map((group, i) => buildAssistantTimeline(
+      group,
+      i !== lastNonSystem.index ? true : !lastNonSystem.pending,
+    )),
+    [groups, lastNonSystem],
+  )
   /**
    * 「这一轮还有事在跑」。running 只是传输层的猜测，两个方向都会错：
    * ① 收尾后迟到的 assistant 消息会把它顶回 true；② 3 秒内连发的 run_completed
@@ -676,6 +708,20 @@ function App(): React.ReactElement {
         }
         else if (state === 'unauthorized') { setConnection('凭据无效'); setConnected(false) }
         else { setConnection(state === 'connecting' ? '连接中…' : `连接断开${info ? ` · ${info}` : ''}`); setConnected(false) }
+      },
+      // 重放追平后，按权威消息状态校准 running：手机切后台/锁屏会掐掉 WS，重连重放尾流可能把
+      // running 顶回 true 却没配对 run_completed（重放窗口已越过它）。只要最后一轮末尾工具已收齐、
+      // 说明早已跑完，就把 running 归零 —— 否则过程组不收起、运行指示常亮。只在「重连追平」时校准，
+      // 不会误伤正在进行的轮次（那时候末尾工具还在飞，这里不会动它）。
+      onAgentResumeStatus: (status) => {
+        if (!status.complete || !runningRef.current) return
+        const list = groupsRef.current
+        let last: MessageGroup | undefined
+        for (let i = list.length - 1; i >= 0; i--) {
+          const candidate = list[i]
+          if (candidate && candidate.type !== 'system') { last = candidate; break }
+        }
+        if (last?.type === 'assistant-turn' && !turnHasTrailingPendingTool(last)) setRunning(false)
       },
       onAgentEvent: (event) => {
         if (event.sessionId !== sessionId) return

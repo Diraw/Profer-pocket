@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { MessageGroup } from '@profer/session-core'
-import { buildAssistantTimeline, isTurnFinished, isTurnSettled, summarizeProcess, toolLabel } from './turn-timeline'
+import { buildAssistantTimeline, isTurnFinished, isTurnSettled, summarizeProcess, toolLabel, turnHasTrailingPendingTool } from './turn-timeline'
 
 /** 一轮 = 若干 assistant 消息 + 承载 tool_result 的 user 消息（tail 用来追加 result 等收尾消息）。 */
 function turnOf(
@@ -203,6 +203,47 @@ describe('非助手回合', () => {
   })
 })
 
+describe('缺结果轮次的正文抽出（WebUI 看不到顶层 result）', () => {
+  const tool = (id: string) => [{ type: 'tool_use', id, name: 'Read', input: { file_path: '/tmp/a' } }]
+
+  test('Given 末尾工具已收齐、中间工具缺结果 When 判定末尾在飞 Then false', () => {
+    // t1 缺结果但它在中间，t2 是末尾且已收齐 → 不算在飞
+    const group = turnOf([tool('t1'), tool('t2'), [text('最终答复')]], [{ id: 't2' }])
+    expect(turnHasTrailingPendingTool(group)).toBe(false)
+  })
+
+  test('Given 末尾工具缺结果 When 判定末尾在飞 Then true（真在跑）', () => {
+    const group = turnOf([tool('t1'), [text('临时')], tool('t2')], [{ id: 't1' }])
+    expect(turnHasTrailingPendingTool(group)).toBe(true)
+  })
+
+  test('Given 末尾工具未收齐 When 判定末尾在飞 Then true', () => {
+    const group = turnOf([tool('t1')], [])
+    expect(turnHasTrailingPendingTool(group)).toBe(true)
+  })
+
+  test('Given 非助手回合 When 判定末尾在飞 Then false', () => {
+    expect(turnHasTrailingPendingTool({ type: 'user', message: {} } as never)).toBe(false)
+  })
+
+  test('Given 中间缺结果、末尾已收齐 When 不传 settled（旧严格分支） Then 正文被藏', () => {
+    // 这就是 WebUI 旧行为：严格分支要求所有工具结果到齐，缺结果的轮次整段正文消失
+    const group = turnOf([tool('t1'), tool('t2'), [text('最终答复')]], [{ id: 't2' }])
+    expect(buildAssistantTimeline(group).headline).toBe('')
+  })
+
+  test('Given 同上 When 传 settled=true（末尾已收齐） Then 正文正常抽出', () => {
+    const group = turnOf([tool('t1'), tool('t2'), [text('最终答复')]], [{ id: 't2' }])
+    expect(buildAssistantTimeline(group, true).headline).toBe('最终答复')
+  })
+
+  test('Given 最终文本后还有工具 When 即便 settled 也收不回正文（文本不是最终）', () => {
+    const group = turnOf([[text('临时')], tool('t1')], [])
+    expect(buildAssistantTimeline(group, true).headline).toBe('')
+  })
+})
+
+
 describe('过程组收起判据（WebUI 看不到 result）', () => {
   const text = (value: string) => [{ type: 'text', text: value }]
   const tool = (id: string) => [{ type: 'tool_use', id, name: 'Read', input: { file_path: '/tmp/a' } }]
@@ -246,3 +287,4 @@ describe('过程组收起判据（WebUI 看不到 result）', () => {
     expect(isTurnSettled(continued, timeline)).toBe(false)
   })
 })
+
