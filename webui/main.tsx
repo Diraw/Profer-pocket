@@ -138,6 +138,13 @@ window.addEventListener('pageshow', (event) => {
   if (event.persisted) window.location.reload()
 })
 
+/**
+ * 关掉浏览器的滚动位置恢复：刷新时浏览器会把视口拉回刷新前的位置，
+ * 而这个恢复发生在 React 贴底 effect 之后，把「自动滚到最新消息」盖掉 ——
+ * 表现为刷新后停在上面。页面自己决定滚动位置（首屏贴底、翻页回锚点）。
+ */
+if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'manual'
+
 /** 空态快捷入口：只填进输入框，不直接发出去，避免误触消耗一轮。 */
 const QUICK_PROMPTS = ['总结一下当前进度', '接下来该做什么', '解释一下刚才的改动']
 
@@ -533,6 +540,18 @@ function App(): React.ReactElement {
     atBottomRef.current = true
     setJumpVisible(false)
   }, [])
+
+  /**
+   * 首屏贴底并追赶异步撑高：图片/图表卡片是加载完成后才撑高内容的，
+   * 只滚一次会停在「文字版底部」，等图片出来视口就悬在上面。
+   * 连续校准几轮；用户手动上滑（atBottomRef 被 handleStreamScroll 置 false）即停。
+   */
+  const pinToLatest = React.useCallback((remaining: number): void => {
+    const node = scrollRef.current
+    if (!node || !atBottomRef.current) return
+    scrollToLatest(false)
+    if (remaining > 0) window.setTimeout(() => pinToLatest(remaining - 1), 350)
+  }, [scrollToLatest])
 
   const handleStreamScroll = (): void => {
     const node = scrollRef.current
@@ -995,6 +1014,8 @@ function App(): React.ReactElement {
       await loadChannels(client)
       await loadPresets(client, typeof rawMeta?.workspaceSlug === 'string' ? rawMeta.workspaceSlug : undefined)
       await reload(client)
+      // 首屏贴底并追赶异步撑高（图片/图表加载），用户上滑即停
+      pinToLatest(8)
       await loadInteractions(client)
       await loadGoal(client)
       await loadGoalHistory(client)
@@ -1008,7 +1029,7 @@ function App(): React.ReactElement {
       client.disconnect()
       clientRef.current = null
     }
-  }, [sessionId, token, reload, calibrateRunning, loadInteractions, loadGoal, loadGoalHistory, loadVisualizations, loadSessionMeta, loadPresets])
+  }, [sessionId, token, reload, calibrateRunning, pinToLatest, loadInteractions, loadGoal, loadGoalHistory, loadVisualizations, loadSessionMeta, loadPresets])
 
   const respondPermission = React.useCallback(async (
     requestId: string,
