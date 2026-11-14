@@ -155,12 +155,12 @@ describe('实时消息合并：按 _provenance 身份覆盖，partial 不成残�
 })
 
 describe('重拉页面合并：流式中的消息不被冲掉', () => {
-  test('Given 在飞的 partial（不在 JSONL）When 合并页面 Then 原样保留', () => {
+  test('Given 在飞的 partial（不在 JSONL）When 合并页面 Then 原样保留在最新侧', () => {
     const live = [partialFrame('正在输出', { messageId: 'm-live' })]
     const page = [finalFrame('旧回复', 'u-old', 'm-old')]
     const merged = mergeReloadPage(live, page)
     expect(merged).toHaveLength(2)
-    expect(merged[0]).toBe(live[0])
+    expect(merged[1]).toBe(live[0])
   })
 
   test('Given 页面带回同身份 final（漏帧后落盘）When 合并 Then final 覆盖 partial', () => {
@@ -187,11 +187,42 @@ describe('重拉页面合并：流式中的消息不被冲掉', () => {
     expect((merged[0] as { message: { content: Array<{ text: string }> } }).message.content[0].text).toBe('完整回复')
   })
 
-  test('Given 前置加载过更早消息 When 合并页面 Then 更早消息保留在原位', () => {
-    const current = [message('u-older', '更早'), finalFrame('a', 'ua', 'ma')]
-    const page = [finalFrame('a', 'ua', 'ma'), finalFrame('b', 'ub', 'mb')]
+  test('Given 前置加载过更早消息 When 合并页面 Then 更早消息保留在头部', () => {
+    const older = { ...message('u-older', '更早'), _createdAt: 500 } as unknown as SDKMessage
+    const current = [older, { ...finalFrame('a', 'ua', 'ma'), _createdAt: 2000 } as unknown as SDKMessage]
+    const page = [
+      { ...finalFrame('a', 'ua', 'ma'), _createdAt: 2000 } as unknown as SDKMessage,
+      { ...finalFrame('b', 'ub', 'mb'), _createdAt: 3000 } as unknown as SDKMessage,
+    ]
     const merged = mergeReloadPage(current, page)
     expect(merged).toHaveLength(3)
-    expect(merged[0]).toBe(current[0])
+    expect(merged[0]).toBe(older)
+  })
+})
+
+describe('mergeReloadPage 的顺序：更早消息不许被顶到尾部', () => {
+  const stamped = (text: string, messageId: string, createdAt: number): SDKMessage =>
+    ({ ...finalFrame(text, `u-${messageId}`, messageId), _createdAt: createdAt } as unknown as SDKMessage)
+
+  test('Given 页面包含当前没持有的更早消息 When 合并 Then 按时间顺序排，最新消息留在底部', () => {
+    // 这就是「模型回复完消息跳到上面去」的根因：更早消息被追加到尾部 → 乱序
+    const current = [stamped('B', 'mb', 2000), stamped('C', 'mc', 3000)]
+    const page = [stamped('A', 'ma', 1000), stamped('B', 'mb', 2000), stamped('C', 'mc', 3000), stamped('D', 'md', 4000)]
+    const merged = mergeReloadPage(current, page)
+    expect(merged.map((m) => (m as { message: { content: Array<{ text: string }> } }).message.content[0].text)).toEqual(['A', 'B', 'C', 'D'])
+  })
+
+  test('Given 在飞 partial 无 createdAt When 合并 Then 留在尾部（最新侧），不乱序', () => {
+    const current = [stamped('B', 'mb', 2000), partialFrame('正在输出', { messageId: 'm-live' })]
+    const page = [stamped('A', 'ma', 1000), stamped('B', 'mb', 2000)]
+    const merged = mergeReloadPage(current, page)
+    expect(merged.map((m) => (m as { message: { content: Array<{ text: string }> } }).message.content[0].text)).toEqual(['A', 'B', '正在输出'])
+  })
+
+  test('Given 前置加载的更早消息 When 合并 Then 保持在头部', () => {
+    const current = [stamped('Old', 'mo', 500), stamped('B', 'mb', 2000)]
+    const page = [stamped('B', 'mb', 2000), stamped('C', 'mc', 3000)]
+    const merged = mergeReloadPage(current, page)
+    expect(merged.map((m) => (m as { message: { content: Array<{ text: string }> } }).message.content[0].text)).toEqual(['Old', 'B', 'C'])
   })
 })

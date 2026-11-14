@@ -132,9 +132,55 @@ export function upsertMessage(list: SDKMessage[], incoming: SDKMessage): SDKMess
  * - 页面里新的消息：按页面顺序追加到尾部。
  */
 export function mergeReloadPage(current: readonly SDKMessage[], page: readonly SDKMessage[]): SDKMessage[] {
-  let next = current.slice()
-  for (const message of page) {
-    next = upsertMessage(next, message)
+  const isPartial = (message: SDKMessage): boolean => (message as { _partial?: unknown })._partial === true
+  const createdAtOf = (message: SDKMessage): number | undefined => {
+    const value = (message as { _createdAt?: unknown })._createdAt
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined
   }
-  return next
+  // 1) 以页面（JSONL 权威顺序）为基准序列
+  const merged: SDKMessage[] = []
+  const identityIndex = new Map<string, number>()
+  for (const message of page) {
+    const identity = messageIdentity(message)
+    const existing = identity !== undefined ? identityIndex.get(identity) : undefined
+    if (existing !== undefined) {
+      if (!(isPartial(message) && !isPartial(merged[existing] as SDKMessage))) {
+        merged[existing] = message
+      }
+      continue
+    }
+    if (identity !== undefined) identityIndex.set(identity, merged.length)
+    merged.push(message)
+  }
+  // 2) 当前持有的消息：同身份按方向保护回填（final 不被 stale partial 顶退），
+  //    不同身份按 createdAt 归位 —— 更早的进头部、在飞的留尾部。
+  //    此前无脑追加尾部，页面里「当前没持有的更早消息」会被顶到末尾 → 顺序错乱、
+  //    最新消息跳到上面去（「模型回复完消息跳到上面去」的根因）。
+  const pageFirst = page.map(createdAtOf).find((value) => value !== undefined)
+  const head: SDKMessage[] = []
+  const tail: SDKMessage[] = []
+  for (const message of current) {
+    const identity = messageIdentity(message)
+    const index = identity !== undefined ? identityIndex.get(identity) : undefined
+    if (index !== undefined) {
+      const existing = merged[index] as SDKMessage
+      if (!(isPartial(message) && !isPartial(existing))) merged[index] = message
+      continue
+    }
+    const createdAt = createdAtOf(message)
+    if (createdAt !== undefined && pageFirst !== undefined && createdAt <= pageFirst) head.push(message)
+    else tail.push(message)
+  }
+  for (const message of tail) {
+    const identity = messageIdentity(message)
+    const index = identity !== undefined ? identityIndex.get(identity) : undefined
+    if (index !== undefined) {
+      const existing = merged[index] as SDKMessage
+      if (!(isPartial(message) && !isPartial(existing))) merged[index] = message
+      continue
+    }
+    if (identity !== undefined) identityIndex.set(identity, merged.length)
+    merged.push(message)
+  }
+  return [...head, ...merged]
 }
