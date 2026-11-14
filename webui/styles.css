@@ -117,26 +117,29 @@ body {
 }
 
 /* 聊天标题：与输入条、圆键同一材质（lowest + 细边线 + 轻投影）。
-   双行：标题一行居中，第二行「模型 · ＋ 目标 · 连接点」—— 全部收进这一个圆框。 */
+   双行居中（标题 / 模型），右侧固定一列放 ＋ 目标与连接绿点 —— 全部收进这一个圆框。 */
 .title-pill {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 1px;
   min-width: 0;
-  padding: 6px var(--sp-4);
+  padding: 6px 52px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-pill);
   background: var(--surface-lowest);
   box-shadow: var(--float-shadow);
 }
-.pill-row {
+.pill-aside {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  max-width: 100%;
 }
-.pill-spacer { flex: 1; min-width: var(--sp-2); }
 /* 框内小加钮：设定目标 */
 .pill-icon {
   flex: none;

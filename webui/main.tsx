@@ -1568,18 +1568,18 @@ function App(): React.ReactElement {
         {/* 一个圆框一横排：标题 · 模型 · ＋ 目标 · 连接点 */}
         <div className="title-pill" title={meta?.title || sessionId}>
           <span className="title-text">{meta?.title || 'Profer 会话'}</span>
-          <div className="pill-row">
-            <button
-              className="model-chip"
-              onClick={() => setSettingsMenuOpen((previous) => !previous)}
-              aria-expanded={settingsMenuOpen}
-              aria-haspopup="menu"
-              disabled={!meta}
-              title="切换模型与推理强度"
-            >
-              {describeSessionModel(meta?.modelId, models, strength, currentPreset, presetRequired)}
-            </button>
-            <span className="pill-spacer" />
+          <button
+            className="model-chip"
+            onClick={() => setSettingsMenuOpen((previous) => !previous)}
+            aria-expanded={settingsMenuOpen}
+            aria-haspopup="menu"
+            disabled={!meta}
+            title="切换模型与推理强度"
+          >
+            {describeSessionModel(meta?.modelId, models, strength, currentPreset, presetRequired)}
+          </button>
+          {/* 右侧固定：＋ 目标与连接绿点，不参与两行居中 */}
+          <div className="pill-aside">
             {staleBundle && (
               <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
                 ⚠
