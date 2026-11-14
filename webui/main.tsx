@@ -262,6 +262,8 @@ function App(): React.ReactElement {
   const [busy, setBusy] = React.useState(false)
   /** 压缩 run 飞行中：按钮自身显示「压缩中…」，run 结束自动恢复 —— 不用 notice（没人清会残留）。 */
   const [compacting, setCompacting] = React.useState(false)
+  /** 会话/构建信息弹层：调试信息不常驻状态条，点 ⓘ 查看（再点收起）。 */
+  const [metaInfoOpen, setMetaInfoOpen] = React.useState(false)
   const [acting, setActing] = React.useState(false)
   const [notice, setNotice] = React.useState('')
   const [permissions, setPermissions] = React.useState<PermissionItem[]>([])
@@ -468,7 +470,8 @@ function App(): React.ReactElement {
       at: resolveTurnTime(group),
       model: modelLabelFor(resolveTurnModel(group), models),
       clock: formatClock(resolveTurnTime(group)),
-      sourceLabel: source ? SOURCE_LABELS[source] : '',
+      // 「网页」来源不标注（自己从网页发的无需自我说明）；软件/定时/远程/代理才有信息价值
+      sourceLabel: source && source !== 'web' ? SOURCE_LABELS[source] : '',
       usageText: usage ? describeUsage(usage) : '',
       usageDetail: usage ? describeUsageDetail(usage) : '',
     }
@@ -1852,9 +1855,8 @@ function App(): React.ReactElement {
             rows={1}
             value={input}
             disabled={hasPending}
-            placeholder={hasPending
-              ? '先处理上方的确认卡片'
-              : PREFER_SEND_BUTTON ? '发送消息…' : '发送消息…（Enter 发送，Shift+Enter 换行）'}
+            placeholder={hasPending ? '先处理上方的确认卡片' : '发送消息…'}
+            title={PREFER_SEND_BUTTON ? undefined : 'Enter 发送，Shift+Enter 换行'}
             enterKeyHint={PREFER_SEND_BUTTON ? 'enter' : 'send'}
             onChange={(event) => setInput(event.target.value)}
             onPaste={(event) => {
@@ -1905,13 +1907,24 @@ function App(): React.ReactElement {
             {compacting ? '压缩中…' : '压缩上下文'}
           </button>
           <span className="spacer" />
-          <span title={sessionId}>会话 {sessionId ? sessionId.slice(0, 8) : '未指定'}</span>
-          <span>·</span>
-          <span>构建 {__WEBUI_BUILD__}</span>
           {staleBundle && (
             <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
               ⚠ 旧版缓存，Ctrl+Shift+R 硬刷新
             </span>
+          )}
+          <button
+            type="button"
+            className="meta-info"
+            aria-label="会话与版本信息"
+            onClick={() => setMetaInfoOpen((previous) => !previous)}
+          >
+            i
+          </button>
+          {metaInfoOpen && (
+            <div className="meta-popover">
+              <div>会话 {sessionId ? sessionId.slice(0, 8) : '未指定'}</div>
+              <div>构建 {__WEBUI_BUILD__}</div>
+            </div>
           )}
         </div>
       </div>

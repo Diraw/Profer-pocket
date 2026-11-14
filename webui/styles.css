@@ -290,6 +290,9 @@ body {
   min-height: 0;
   overflow-y: auto;
   padding: var(--sp-4) var(--gutter-right) var(--sp-6) var(--gutter-left);
+  /* 桌面阅读限宽：内容列 720px 居中，右侧不再留大片空白；
+     手机（< 720 + gutter）自然全宽，此规则不生效。 */
+  --content-w: 720px;
   /* 不设 scroll-behavior: smooth —— 流式输出时每帧重置平滑动画会明显拖影，
      平滑只用在「回到最新」按钮上（scrollTo({behavior:'smooth'})）。 */
   overscroll-behavior: contain;
@@ -298,6 +301,11 @@ body {
 .stream::-webkit-scrollbar-thumb { background: var(--surface); border-radius: var(--r-pill); }
 .stream::-webkit-scrollbar-track { background: transparent; }
 
+.stream > * {
+  max-width: var(--content-w);
+  margin-left: auto;
+  margin-right: auto;
+}
 .turn { margin-bottom: var(--sp-6); }
 .turn:last-child { margin-bottom: var(--sp-2); }
 
@@ -315,6 +323,7 @@ body {
 
 /* 回合元信息：来源 · 时间 · token。11px 小字，不抢正文；数字等宽避免跳动 */
 .turn-meta {
+  opacity: .8;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -338,7 +347,8 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.tm-usage { letter-spacing: .2px; }
+.tm-usage { letter-spacing: .2px; opacity: .45; transition: opacity .15s ease; }
+.turn:hover .tm-usage { opacity: 1; }
 
 /* 用户气泡里的附件 chip：只露文件名，路径放在 title 里 */
 .turn-attachments {
@@ -672,8 +682,39 @@ body {
   cursor: pointer;
 }
 .compact-btn:hover:enabled { color: var(--ink); border-color: var(--muted); }
+/* 调试信息收纳：会话 ID / 构建戳不再常驻状态条，点 ⓘ 弹出查看 */
+.meta-info {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-left: 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: .7;
+}
+.meta-info:hover { opacity: 1; color: var(--ink); }
+.meta-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: nowrap;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+}
 .compact-btn:disabled { opacity: .45; cursor: default; }
 .composer-meta {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -1203,7 +1244,6 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
   align-self: flex-start;
   margin: 0 var(--gutter-right) var(--sp-2) var(--gutter-left);
   padding: 5px 12px;
-  border-style: dashed;
   background: transparent;
   color: var(--muted);
   font-size: 11.5px;
