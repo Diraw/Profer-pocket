@@ -47,7 +47,7 @@ export function DiagOverlay({ data }: { data: DiagData }): React.ReactElement | 
     () => new URLSearchParams(window.location.search).has('diag'),
   )
   const [collapsed, setCollapsed] = React.useState(false)
-  const [copied, setCopied] = React.useState(false)
+  const [copied, setCopied] = React.useState<false | true | 'manual'>(false)
   const dataRef = React.useRef(data)
   dataRef.current = data
   const bodyRef = React.useRef<HTMLPreElement>(null)
@@ -61,23 +61,37 @@ export function DiagOverlay({ data }: { data: DiagData }): React.ReactElement | 
     return () => { window.clearInterval(timer) }
   }, [enabled, collapsed])
 
-  const copy = React.useCallback(async (): Promise<void> => {
+  const copy = React.useCallback((): void => {
     const text = JSON.stringify(dataRef.current, null, 1)
-    try {
-      await navigator.clipboard.writeText(text)
+    // 先同步把最新内容写进面板（interval 里的可能还没渲染），再全选
+    const node = bodyRef.current
+    if (node) {
+      if (node.textContent !== text) node.textContent = text
+      const range = document.createRange()
+      range.selectNodeContents(node)
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+    }
+    // HTTP 局域网（非安全上下文）没有 navigator.clipboard；execCommand 必须在
+    // 用户手势的同步栈内跑，所以先试它，失败才异步走 clipboard API。
+    let ok = false
+    try { ok = document.execCommand('copy') } catch { ok = false }
+    if (ok) {
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1500)
       return
-    } catch {
-      // 剪贴板不可用（非安全上下文 / 权限拒绝）：退化为全选，用户手动复制
     }
-    const node = bodyRef.current
-    if (!node) return
-    const range = document.createRange()
-    range.selectNodeContents(node)
-    const selection = window.getSelection()
-    selection?.removeAllRanges()
-    selection?.addRange(range)
+    void navigator.clipboard?.writeText?.(text)
+      .then(() => {
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1500)
+      })
+      .catch(() => {
+        // 都不可用：内容已全选，给出明确的手动提示
+        setCopied('manual')
+        window.setTimeout(() => setCopied(false), 2500)
+      })
   }, [])
 
   if (!enabled) return null
@@ -99,8 +113,8 @@ export function DiagOverlay({ data }: { data: DiagData }): React.ReactElement | 
     <div className="diag-panel" data-testid="webui-diag-panel">
       <div className="diag-bar">
         <span className="diag-title">DIAG</span>
-        <button type="button" className="diag-btn" onClick={() => void copy()}>
-          {copied ? '已复制 ✓' : '复制'}
+        <button type="button" className="diag-btn" onClick={copy}>
+          {copied === 'manual' ? '已全选，按 Ctrl+C' : copied ? '已复制 ✓' : '复制'}
         </button>
         <button type="button" className="diag-btn" onClick={() => setCollapsed(true)}>
           收起
