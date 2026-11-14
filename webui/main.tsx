@@ -262,6 +262,8 @@ function App(): React.ReactElement {
   const [busy, setBusy] = React.useState(false)
   /** 压缩 run 飞行中：按钮自身显示「压缩中…」，run 结束自动恢复 —— 不用 notice（没人清会残留）。 */
   const [compacting, setCompacting] = React.useState(false)
+  /** 目标表单展开：入口在顶栏左上角（三段式导航），表单仍在消息流顶部 */
+  const [goalOpen, setGoalOpen] = React.useState(false)
   const [acting, setActing] = React.useState(false)
   const [notice, setNotice] = React.useState('')
   const [permissions, setPermissions] = React.useState<PermissionItem[]>([])
@@ -1563,6 +1565,18 @@ function App(): React.ReactElement {
   return (
     <div className="app">
       <header className="topbar">
+        <div className="topbar-left">
+          {connected && !goal && (
+            <button
+              type="button"
+              className="goal-new"
+              onClick={() => setGoalOpen((previous) => !previous)}
+              title="设定一个需要多轮持续执行的目标"
+            >
+              + 设定目标
+            </button>
+          )}
+        </div>
         <div className="title-pill" title={meta?.title || sessionId}>
           <span className="title-text">{meta?.title || 'Profer 会话'}</span>
           {/* 模型与强度聚在标题下：会话的「它是什么」比标题本身还常被查 */}
@@ -1577,13 +1591,15 @@ function App(): React.ReactElement {
             {describeSessionModel(meta?.modelId, models, strength, currentPreset, presetRequired)}
           </button>
         </div>
-        {staleBundle && (
-          <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
-            ⚠ 旧版缓存
-          </span>
-        )}
-        <div className="conn" title={connected ? '已连接' : connection}>
-          <span className={`conn-dot ${connected ? 'ok' : notice ? 'bad' : 'wait'}`} />
+        <div className="topbar-right">
+          {staleBundle && (
+            <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
+              ⚠ 旧版缓存
+            </span>
+          )}
+          <div className="conn" title={connected ? '已连接' : connection}>
+            <span className={`conn-dot ${connected ? 'ok' : notice ? 'bad' : 'wait'}`} />
+          </div>
         </div>
       </header>
       {settingsMenuOpen && (
@@ -1621,7 +1637,12 @@ function App(): React.ReactElement {
           />
         )
         : connected
-          ? <GoalLauncher busy={acting} onStart={(text, contract) => void startGoal(text, contract)} />
+          ? <GoalLauncher
+            busy={acting}
+            open={goalOpen}
+            onOpenChange={setGoalOpen}
+            onStart={(nextGoal, contract) => { setGoalOpen(false); void startGoal(nextGoal, contract) }}
+          />
           : null}
       {presetPanelOpen && (
         <PresetPanel

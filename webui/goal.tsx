@@ -195,22 +195,20 @@ export function GoalBar({ goal, archives, busy, waits, onAction, onEdit }: {
  * 契约三项是可选的「高阶输入」：默认折叠，需要的人展开填。目标本身仍然只要一句话，
  * 不给必填项 —— 大多数目标一句话就够，契约是给需要反复验收的场景用的。
  */
-export function GoalLauncher({ busy, onStart }: {
+export function GoalLauncher({ busy, open, onOpenChange, onStart }: {
   busy: boolean
+  /** 受控展开：收起态的入口在顶栏左上角（三段式导航），本组件只负责表单 */
+  open: boolean
+  onOpenChange: (open: boolean) => void
   onStart: (goal: string, contract: GoalContract | undefined) => void
-}): React.ReactElement {
-  const [open, setOpen] = React.useState(false)
+}): React.ReactElement | null {
   const [text, setText] = React.useState('')
   const [contractOpen, setContractOpen] = React.useState(false)
   const [contract, setContract] = React.useState({ verification: '', constraints: '', stopWhen: '' })
 
-  if (!open) {
-    return (
-      <button className="goal-new" onClick={() => setOpen(true)}>+ 设定目标</button>
-    )
-  }
+  if (!open) return null
   const reset = (): void => {
-    setOpen(false)
+    onOpenChange(false)
     setText('')
     setContractOpen(false)
     setContract({ verification: '', constraints: '', stopWhen: '' })

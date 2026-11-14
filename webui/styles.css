@@ -103,16 +103,25 @@ body {
 /* ===== 顶栏 ===== */
 .topbar {
   display: flex;
-  /* 极简顶栏：标题 pill 占满，右侧只剩连接点（旧版告警时多一颗 badge）。
-     不用 grid 三列 —— 删掉左列的权限按钮后元素会左移进 40px 定宽列，
-     标题 pill 被压成竖条（实测 bug）。flex 自适应不依赖列数。 */
+  /* 三段式导航（左动作 / 中标题 / 右状态）：两侧各 flex:1 等比，
+     标题 pill 真居中。flex 而非 grid —— 增删元素不再有列错位风险
+     （实测：删掉 grid 首列元素后标题被压成竖条）。 */
   align-items: center;
   gap: var(--sp-2);
   min-height: 64px;
   padding: var(--sp-3) var(--gutter-right) var(--sp-3) var(--gutter-left);
 }
-.topbar .title-pill {
+.topbar-left,
+.topbar-right {
   flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.topbar-right { justify-content: flex-end; }
+.topbar .title-pill {
+  flex: 0 1 auto;
   min-width: 0;
 }
 
@@ -1201,8 +1210,6 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 .goal-new {
   /* 收起态只是一颗贴左的小按钮，不要拉成整行虚线框（那会变成页面上最响的元素） */
   display: inline-flex;
-  align-self: flex-start;
-  margin: 0 var(--gutter-right) var(--sp-2) var(--gutter-left);
   padding: 5px 12px;
   background: transparent;
   color: var(--muted);
