@@ -1568,37 +1568,39 @@ function App(): React.ReactElement {
         {/* 一个圆框一横排：标题 · 模型 · ＋ 目标 · 连接点 */}
         <div className="title-pill" title={meta?.title || sessionId}>
           <span className="title-text">{meta?.title || 'Profer 会话'}</span>
-          <button
-            className="model-chip"
-            onClick={() => setSettingsMenuOpen((previous) => !previous)}
-            aria-expanded={settingsMenuOpen}
-            aria-haspopup="menu"
-            disabled={!meta}
-            title="切换模型与推理强度"
-          >
-            {describeSessionModel(meta?.modelId, models, strength, currentPreset, presetRequired)}
-          </button>
-          <span className="pill-spacer" />
-          {staleBundle && (
-            <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
-              ⚠
-            </span>
-          )}
-          {connected && !goal && (
+          <div className="pill-row">
             <button
-              type="button"
-              className="pill-icon"
-              onClick={() => setGoalOpen((previous) => !previous)}
-              title="设定目标"
-              aria-label="设定目标"
+              className="model-chip"
+              onClick={() => setSettingsMenuOpen((previous) => !previous)}
+              aria-expanded={settingsMenuOpen}
+              aria-haspopup="menu"
+              disabled={!meta}
+              title="切换模型与推理强度"
             >
-              +
+              {describeSessionModel(meta?.modelId, models, strength, currentPreset, presetRequired)}
             </button>
-          )}
-          <span
-            className={`conn-dot ${connected ? 'ok' : notice ? 'bad' : 'wait'}`}
-            title={connected ? '已连接' : connection}
-          />
+            <span className="pill-spacer" />
+            {staleBundle && (
+              <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
+                ⚠
+              </span>
+            )}
+            {connected && !goal && (
+              <button
+                type="button"
+                className="pill-icon"
+                onClick={() => setGoalOpen((previous) => !previous)}
+                title="设定目标"
+                aria-label="设定目标"
+              >
+                +
+              </button>
+            )}
+            <span
+              className={`conn-dot ${connected ? 'ok' : notice ? 'bad' : 'wait'}`}
+              title={connected ? '已连接' : connection}
+            />
+          </div>
         </div>
       </header>
       {settingsMenuOpen && (
