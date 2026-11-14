@@ -296,6 +296,12 @@ function App(): React.ReactElement {
   const atBottomRef = React.useRef(true)
   /** 上次已知的 scrollTop：区分「用户滚动」与「布局撑高引发的 scroll 事件」。 */
   const lastScrollTopRef = React.useRef(0)
+  /**
+   * 首屏「自动贴底模式」：刷新后直到用户首次滚动输入之前，任何布局变化
+   * （图片/图表加载撑高、GoalBar 等顶部区块迟到插入）都不许把视口拽走。
+   * 用户一滚（滚轮/触摸/键盘）立即交还控制，恢复正常贴底语义。
+   */
+  const userEngagedRef = React.useRef(false)
   const [jumpVisible, setJumpVisible] = React.useState(false)
   const [pageStart, setPageStart] = React.useState(0)
   const [hasOlder, setHasOlder] = React.useState(false)
@@ -508,6 +514,16 @@ function App(): React.ReactElement {
     applyPageTitle(meta.title)
   }, [meta])
 
+  // 键盘滚动（空格/方向键/PgUp/PgDn/Home/End）也算用户接管
+  React.useEffect(() => {
+    const scrollKeys = new Set([' ', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (scrollKeys.has(event.key)) userEngagedRef.current = true
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
   // 菜单开着时能用 Esc 关掉，否则手机返回键/键盘都会觉得被卡住
   React.useEffect(() => {
     if (!modeMenuOpen) return
@@ -559,7 +575,7 @@ function App(): React.ReactElement {
     let raf = 0
     const tick = (): void => {
       const node = scrollRef.current
-      if (node && atBottomRef.current) {
+      if (node && (atBottomRef.current || !userEngagedRef.current)) {
         const gap = node.scrollHeight - node.scrollTop - node.clientHeight
         if (gap > 0) {
           node.scrollTop = node.scrollHeight
@@ -583,6 +599,9 @@ function App(): React.ReactElement {
     if (node.scrollTop === lastScrollTopRef.current) return
     lastScrollTopRef.current = node.scrollTop
     const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 48
+    if (atBottom !== atBottomRef.current) {
+      diagEvent(`atBottom ${atBottomRef.current}→${atBottom} scrollTop=${Math.round(node.scrollTop)} sh=${node.scrollHeight} ch=${node.clientHeight}`)
+    }
     atBottomRef.current = atBottom
     // 只在可见性真变化时 setState，否则滚动过程中每次都重渲染整个消息树。
     setJumpVisible((previous) => (previous === !atBottom ? previous : !atBottom))
@@ -1611,7 +1630,14 @@ function App(): React.ReactElement {
       )}
       {notice && <div className="notice">{notice}</div>}
       <div className="stage">
-        <div className="stream" ref={scrollRef} onScroll={handleStreamScroll}>
+        <div
+          className="stream"
+          ref={scrollRef}
+          onScroll={handleStreamScroll}
+          onWheel={() => { userEngagedRef.current = true }}
+          onTouchStart={() => { userEngagedRef.current = true }}
+          onKeyDown={() => { userEngagedRef.current = true }}
+        >
           {hasOlder && (
             <div className="load-older">
               <button className="load-older-btn" disabled={loadingOlder} onClick={() => void loadOlder()}>
