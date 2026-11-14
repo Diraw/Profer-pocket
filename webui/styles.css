@@ -92,7 +92,9 @@ body {
   position: relative; /* 权限模式菜单的定位上下文 */
   display: flex;
   flex-direction: column;
-  height: 100%;
+  /* --app-h 由 visualViewport 注入：iOS 键盘弹出时 viewport 高度不缩，
+     100%/100dvh 都会把输入条顶到键盘下面；跟随 vv 高度才能贴住键盘上方。 */
+  height: var(--app-h, 100dvh);
   max-width: var(--max-width);
   margin: 0 auto;
   background:
@@ -110,6 +112,7 @@ body {
   gap: var(--sp-2);
   min-height: 64px;
   padding: var(--sp-3) var(--gutter-right) var(--sp-3) var(--gutter-left);
+  padding-top: max(var(--sp-3), env(safe-area-inset-top));
 }
 .topbar .title-pill {
   flex: 1;
@@ -607,6 +610,8 @@ body {
   background: transparent;
   color: var(--ink);
   font: inherit;
+  /* iOS Safari：输入框字号 <16px 聚焦时自动放大页面（zoom）——必须 16px */
+  font-size: 16px;
   line-height: 22px;
   outline: none;
   resize: none;
@@ -1252,6 +1257,7 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
 }
 .goal-launcher textarea {
   width: 100%;
+  font-size: 16px;
   padding: 9px var(--sp-3);
   border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
@@ -1475,6 +1481,21 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
   .chev, .send-btn, .composer-pill { transition: none; }
   .running-hint::after { animation: none; opacity: 1; }
   .prow-dot.live { animation: none; opacity: 1; }
+}
+
+/* iOS Safari 触屏细节 */
+button, [role="button"] {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation; /* 防双击缩放与 300ms 点击延迟 */
+}
+.pill-icon {
+  position: relative;
+}
+.pill-icon::after {
+  /* 视觉 22px，触区扩到 44px（iOS HIG 最小可点面积） */
+  content: '';
+  position: absolute;
+  inset: -11px;
 }
 
 /* 诊断浮层（?diag=1）：右下角、可选中复制、可收起成 pill */

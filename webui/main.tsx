@@ -647,6 +647,27 @@ function App(): React.ReactElement {
     })
   }, [])
 
+  /**
+   * iPhone Safari 键盘适配：软键盘弹出时不缩 layout viewport，
+   * 100%/100dvh 都会把输入条顶到键盘下面。把 visualViewport 的实际高度
+   * 注入 --app-h，.app 用它做高度 —— 输入条始终贴在键盘上方。
+   */
+  React.useEffect(() => {
+    const viewport = window.visualViewport
+    if (!viewport) return
+    const apply = (): void => {
+      document.documentElement.style.setProperty('--app-h', `${viewport.height}px`)
+    }
+    apply()
+    viewport.addEventListener('resize', apply)
+    viewport.addEventListener('scroll', apply)
+    return () => {
+      viewport.removeEventListener('resize', apply)
+      viewport.removeEventListener('scroll', apply)
+      document.documentElement.style.removeProperty('--app-h')
+    }
+  }, [])
+
   /** 输入框自增长；先归 auto 再取 scrollHeight，否则删字后高度不会回缩。 */
   React.useEffect(() => {
     const node = inputRef.current
