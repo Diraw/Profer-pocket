@@ -30,6 +30,8 @@ export interface DiagLastTurn {
 
 export interface DiagData {
   build: string
+  stale: boolean
+  events: string[]
   reconnects: number
   connected: boolean
   running: boolean

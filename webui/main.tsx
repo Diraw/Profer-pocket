@@ -239,6 +239,18 @@ function App(): React.ReactElement {
   const messagesRef = React.useRef<SDKMessage[]>([])
   /** WS 重连次数（含首次连接）：诊断「电脑复现 iPhone 不复现」用。 */
   const reconnectCountRef = React.useRef(0)
+  /** 诊断事件环形缓冲：记录 reload/重连/正文变化等关键时序，复制一次带上事发经过。 */
+  const diagEventsRef = React.useRef<string[]>([])
+  const diagEvent = (line: string): void => {
+    const now = new Date()
+    const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+    const list = diagEventsRef.current
+    list.push(`${clock} ${line}`)
+    if (list.length > 40) list.shift()
+  }
+  /** 页面加载的 bundle 与服务端当前 bundle 是否一致（不一致=旧包，硬刷新即可）。 */
+  const [staleBundle, setStaleBundle] = React.useState(false)
+  const lastHeadlineLenRef = React.useRef(0)
   const [input, setInput] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [acting, setActing] = React.useState(false)
@@ -367,8 +379,19 @@ function App(): React.ReactElement {
     }
     const lastGroup = lastNonSystem.index >= 0 ? groups[lastNonSystem.index] : undefined
     const lastTimeline = lastNonSystem.index >= 0 ? timelines[lastNonSystem.index] : undefined
+    // headline 非空→空 的翻转是「正文消失」的现场信号，记录进事件历史
+    const headlineLen = lastNonSystem.index >= 0 ? (timelines[lastNonSystem.index]?.headline.length ?? 0) : 0
+    const previousHeadline = lastHeadlineLenRef.current
+    lastHeadlineLenRef.current = headlineLen
+    if (previousHeadline > 0 && headlineLen === 0) {
+      diagEvent(`headline ${previousHeadline} → 0（正文消失）`)
+    } else if (previousHeadline === 0 && headlineLen > 0) {
+      diagEvent(`headline 0 → ${headlineLen}（正文出现）`)
+    }
     return {
       build: __WEBUI_BUILD__,
+      stale: staleBundle,
+      events: diagEventsRef.current.slice(-25),
       reconnects: reconnectCountRef.current,
       connected,
       running,
@@ -390,7 +413,7 @@ function App(): React.ReactElement {
         }
         : null,
     }
-  }, [messages, groups, timelines, lastNonSystem, running, sessionActive, lastTurnFinished, connected, reconnectCountRef])
+  }, [messages, groups, timelines, lastNonSystem, running, sessionActive, lastTurnFinished, connected, reconnectCountRef, staleBundle])
   /** 内核决定用哪套推理档位；缺省按 claude 处理（历史会话与旧服务端都是这个默认） */
   const agentRuntime = meta?.agentRuntime ?? 'claude'
   /** 当前内核可切的模型（过滤规则与服务端 update_session_model 同一份） */
@@ -524,6 +547,32 @@ function App(): React.ReactElement {
     if (atBottomRef.current) scrollToLatest(false)
   }, [groups, hasPending, sessionActive, scrollToLatest])
 
+  /**
+   * bundle 版本自检：fetch 服务端 index.html（no-store），对比它引用的 JS hash
+   * 与当前页面加载的 hash。不一致 = 页面是旧包（bfcache 恢复 / 标签页久开没刷上新包），
+   * 页脚红字提示硬刷新 —— 终结「改了但页面没刷上」的来回猜。
+   */
+  React.useEffect(() => {
+    const check = async (): Promise<void> => {
+      try {
+        const response = await fetch(window.location.pathname, { cache: 'no-store', credentials: 'same-origin' })
+        const html = await response.text()
+        const remote = html.match(/\/webui\/assets\/(index-[^"' ]+\.js)/)?.[1]
+        const localScript = Array.from(document.querySelectorAll('script[src*="index-"]'))
+          .map((node) => (node as HTMLScriptElement).src)
+          .find((src) => /index-[^/]+\.js/.test(src))
+        const local = localScript?.match(/(index-[^/]+\.js)/)?.[1]
+        setStaleBundle(Boolean(remote && local && remote !== local))
+      } catch {
+        /* 自检失败不影响使用 */
+      }
+    }
+    void check()
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') void check()
+    })
+  }, [])
+
   /** 输入框自增长；先归 auto 再取 scrollHeight，否则删字后高度不会回缩。 */
   React.useEffect(() => {
     const node = inputRef.current
@@ -548,6 +597,7 @@ function App(): React.ReactElement {
       const page = decodeMessagePage(
         await client.getSdkMessages(sessionId, { targetMessages: tailPageSize(heldRef.current) }),
       )
+      diagEvent(`reload(${mode}) → ${page.messages.length} 条`)
       if (mode === 'merge') {
         setMessages((previous) => mergeReloadPage(previous, page.messages))
       } else {
@@ -804,6 +854,7 @@ function App(): React.ReactElement {
       // complete 时重放会自愈（漏掉的 run_completed 一定在游标之后、一定被补发），
       // 但重放里的 assistant 消息可能先把 running 顶回 true，顺手校准一次不亏。
       onAgentResumeStatus: (status) => {
+        diagEvent(`resume requiresSnapshot=${status.requiresSnapshot} complete=${status.complete} replayed=${status.replayed}`)
         if (status.requiresSnapshot) {
           // merge：漏帧不补发，但 final 落盘了就能从页面恢复；在飞的 partial 也保留
           void reload(client, 'merge').then(calibrateRunning)
@@ -898,7 +949,7 @@ function App(): React.ReactElement {
           const now = Date.now()
           if (now - lastCompletedRef.current > 3000) {
             lastCompletedRef.current = now
-            void reload(client)
+            void reload(client, 'merge')
             void loadGoal(client)
             void loadVisualizations(client)
             // 首轮之后标题才会被自动生成，结束后重新取一次，标签页才不会一直停在兜底文案
@@ -921,6 +972,7 @@ function App(): React.ReactElement {
     const wake = (): void => {
       if (document.visibilityState !== 'visible') return
       client.reconnectNow()
+      diagEvent(`wake visibility=${document.visibilityState}`)
       // merge：切窗口可能切在流式中，替换会把在飞的正文冲掉且不恢复
       void reload(client, 'merge').then(calibrateRunning)
     }
@@ -1704,6 +1756,11 @@ function App(): React.ReactElement {
           <span title={sessionId}>会话 {sessionId ? sessionId.slice(0, 8) : '未指定'}</span>
           <span>·</span>
           <span>构建 {__WEBUI_BUILD__}</span>
+          {staleBundle && (
+            <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
+              ⚠ 旧版缓存，Ctrl+Shift+R 硬刷新
+            </span>
+          )}
         </div>
       </div>
       <DiagOverlay data={diagData} />

@@ -1477,6 +1477,14 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
   user-select: text;
   -webkit-user-select: text;
 }
+.stale-badge {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border: 1px solid #e89b91;
+  border-radius: 6px;
+  color: #e89b91;
+  font-size: 10px;
+}
 .diag-pill {
   position: fixed;
   right: 8px;
