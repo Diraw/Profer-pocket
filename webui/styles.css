@@ -113,16 +113,19 @@ body {
 }
 .topbar-left,
 .topbar-right {
-  flex: 1;
+  flex: none;
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
   min-width: 0;
 }
-.topbar-right { justify-content: flex-end; }
 .topbar .title-pill {
-  flex: 0 1 auto;
+  flex: 1;
   min-width: 0;
+}
+/* 「+」圆钮：设定目标入口，与输入条圆键同材质 */
+.icon-btn.add {
+  font-size: 20px;
+  color: var(--ink);
 }
 
 /* 聊天标题：与输入条、圆键同一材质（lowest + 细边线 + 轻投影） */

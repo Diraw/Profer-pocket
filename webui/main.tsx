@@ -1569,11 +1569,12 @@ function App(): React.ReactElement {
           {connected && !goal && (
             <button
               type="button"
-              className="goal-new"
+              className="icon-btn add"
               onClick={() => setGoalOpen((previous) => !previous)}
-              title="设定一个需要多轮持续执行的目标"
+              title="设定目标"
+              aria-label="设定目标"
             >
-              + 设定目标
+              +
             </button>
           )}
         </div>
