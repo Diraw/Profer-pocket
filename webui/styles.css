@@ -102,13 +102,18 @@ body {
 
 /* ===== 顶栏 ===== */
 .topbar {
-  display: grid;
-  /* 左圆键定宽 → 标题占满 → 右侧连接指示按内容宽度，标题居中不靠猜 */
-  grid-template-columns: 40px minmax(0, 1fr) auto;
+  display: flex;
+  /* 极简顶栏：标题 pill 占满，右侧只剩连接点（旧版告警时多一颗 badge）。
+     不用 grid 三列 —— 删掉左列的权限按钮后元素会左移进 40px 定宽列，
+     标题 pill 被压成竖条（实测 bug）。flex 自适应不依赖列数。 */
   align-items: center;
   gap: var(--sp-2);
   min-height: 64px;
   padding: var(--sp-3) var(--gutter-right) var(--sp-3) var(--gutter-left);
+}
+.topbar .title-pill {
+  flex: 1;
+  min-width: 0;
 }
 
 /* 聊天标题：与输入条、圆键同一材质（lowest + 细边线 + 轻投影） */
