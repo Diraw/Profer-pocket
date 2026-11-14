@@ -1484,6 +1484,40 @@ function App(): React.ReactElement {
   }
 
   /**
+   * 手动压缩上下文：与桌面端同一语义 —— 发送 /compact 命令。
+   * 会话里会留下一条 /compact 用户气泡与压缩分隔（compacting / compact_boundary），
+   * 压缩完成由 run_completed 触发 reload 收敛。
+   * 守卫对齐桌面端 handleCompact：运行中 / 待确认 / 未连接都不许发，
+   * busy 兼任防重入（压缩 run 飞行期间按钮保持禁用）。
+   */
+  const compactContext = async (): Promise<void> => {
+    const client = clientRef.current
+    if (!client || busy || !connected || hasPending || sessionActive) return
+    if (!meta?.channelId) {
+      setNotice('尚未取到会话渠道信息，请稍候或刷新页面')
+      return
+    }
+    setBusy(true)
+    try {
+      await client.sendMessage({
+        sessionId,
+        userMessage: '/compact',
+        channelId: meta.channelId,
+        modelId: meta.modelId,
+        workspaceId: meta.workspaceId,
+        permissionMode: meta.permissionMode ?? 'bypassPermissions',
+        clientKind: 'webui',
+      })
+      setRunning(true)
+      setNotice('正在压缩上下文…')
+    } catch (error) {
+      setNotice(`压缩失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
    * 切换模型。服务端会同时更新全局默认（下次新建会话继承），所以这里不用自己记。
    * 成功后重取会话详情：`modelId`、`channelId` 与能力档位都跟着变。
    */
@@ -1844,6 +1878,19 @@ function App(): React.ReactElement {
         </div>
         <div className="composer-meta">
           <span>{hasPending ? '待确认' : sessionActive ? '运行中' : connected ? '空闲' : connection}</span>
+          <button
+            type="button"
+            className="compact-btn"
+            disabled={!connected || busy || hasPending || sessionActive || !meta?.channelId}
+            onClick={() => void compactContext()}
+            title={sessionActive
+              ? '本轮运行中，结束后再压缩'
+              : hasPending
+                ? '先处理上方的确认卡片'
+                : '发送 /compact：把历史压缩成摘要，释放上下文窗口'}
+          >
+            压缩上下文
+          </button>
           <span className="spacer" />
           <span title={sessionId}>会话 {sessionId ? sessionId.slice(0, 8) : '未指定'}</span>
           <span>·</span>

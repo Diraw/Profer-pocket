@@ -659,6 +659,20 @@ body {
 .send-btn.run { background: var(--error-container); color: var(--error); }
 .send-btn:disabled { cursor: not-allowed; }
 
+/* 压缩上下文按钮：与状态条同排的小动作（桌面端对应 ContextUsageBadge 的压缩按钮） */
+.compact-btn {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border: 1px solid var(--outline);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.compact-btn:hover:enabled { color: var(--ink); border-color: var(--muted); }
+.compact-btn:disabled { opacity: .45; cursor: default; }
 .composer-meta {
   display: flex;
   align-items: center;
