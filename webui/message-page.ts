@@ -133,6 +133,12 @@ export function upsertMessage(list: SDKMessage[], incoming: SDKMessage): SDKMess
  */
 export function mergeReloadPage(current: readonly SDKMessage[], page: readonly SDKMessage[]): SDKMessage[] {
   const isPartial = (message: SDKMessage): boolean => (message as { _partial?: unknown })._partial === true
+  /** compacting 是 run 中瞬态（WS 广播有、JSONL 不落盘）：不在页面里的直接丢，
+   *  否则合并只加不减，「正在压缩上下文...」会永久残留（实测两次压缩留两行）。
+   *  compact_boundary（上下文已压缩，落盘）不受影响，作为历史分隔保留。 */
+  const isTransientCompacting = (message: SDKMessage): boolean =>
+    (message as { type?: unknown; subtype?: unknown }).type === 'system'
+    && (message as { subtype?: unknown }).subtype === 'compacting'
   const createdAtOf = (message: SDKMessage): number | undefined => {
     const value = (message as { _createdAt?: unknown })._createdAt
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined
@@ -167,11 +173,13 @@ export function mergeReloadPage(current: readonly SDKMessage[], page: readonly S
       if (!(isPartial(message) && !isPartial(existing))) merged[index] = message
       continue
     }
+    if (isTransientCompacting(message)) continue
     const createdAt = createdAtOf(message)
     if (createdAt !== undefined && pageFirst !== undefined && createdAt <= pageFirst) head.push(message)
     else tail.push(message)
   }
   for (const message of tail) {
+    if (isTransientCompacting(message)) continue
     const identity = messageIdentity(message)
     const index = identity !== undefined ? identityIndex.get(identity) : undefined
     if (index !== undefined) {

@@ -226,3 +226,26 @@ describe('mergeReloadPage 的顺序：更早消息不许被顶到尾部', () => 
     expect(merged.map((m) => (m as { message: { content: Array<{ text: string }> } }).message.content[0].text)).toEqual(['Old', 'B', 'C'])
   })
 })
+
+describe('compacting 瞬态消息不残留', () => {
+  const compacting = (): SDKMessage =>
+    ({ type: 'system', subtype: 'compacting', uuid: 'sys-1', message: '正在压缩上下文...' } as unknown as SDKMessage)
+  const boundary = (): SDKMessage =>
+    ({ type: 'system', subtype: 'compact_boundary', uuid: 'sys-2' } as unknown as SDKMessage)
+
+  test('Given 页面里没有 compacting（不落盘）When 合并 Then 瞬态被丢弃不残留', () => {
+    // 实测：两次压缩各留一条「正在压缩上下文...」——合并只加不减的代价
+    const current = [finalFrame('a', 'ua', 'ma'), compacting()]
+    const page = [finalFrame('a', 'ua', 'ma')]
+    const merged = mergeReloadPage(current, page)
+    expect(merged).toHaveLength(1)
+  })
+
+  test('Given compact_boundary（落盘的历史分隔）When 合并 Then 保留', () => {
+    const current = [boundary(), finalFrame('a', 'ua', 'ma')]
+    const page = [finalFrame('a', 'ua', 'ma')]
+    const merged = mergeReloadPage(current, page)
+    expect(merged).toHaveLength(2)
+    expect(merged.some((m) => (m as { subtype?: string }).subtype === 'compact_boundary')).toBe(true)
+  })
+})

@@ -1034,6 +1034,13 @@ function App(): React.ReactElement {
         if (type === 'run_completed' || type === 'run_idle') {
           setRunning(false)
           setCompacting(false)
+          // compacting 是 run 中瞬态（WS 广播有、JSONL 不落盘），合并重拉不会删它 ——
+          // run 结束必须清场，否则「正在压缩上下文...」永久残留（两次压缩留两行）。
+          // 变矮前记距底距离走 prependAnchor 还原，否则视口被顶上去。
+          const streamNode = scrollRef.current
+          prependAnchorRef.current = streamNode ? streamNode.scrollHeight - streamNode.scrollTop : null
+          setMessages((previous) => previous.filter((message) =>
+            !(message.type === 'system' && (message as { subtype?: unknown }).subtype === 'compacting')))
           const now = Date.now()
           if (now - lastCompletedRef.current > 3000) {
             lastCompletedRef.current = now
