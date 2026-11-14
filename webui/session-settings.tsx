@@ -26,16 +26,26 @@ export interface SessionSettingsMenuProps {
   /** 会话正在跑：模型与档位都不接受修改 */
   running: boolean
   busy: boolean
+  /** 权限模式（原顶栏「自动」按钮，收敛进本菜单保持顶栏干净） */
+  permissionMode: string
+  permissionModes: ReadonlyArray<{ mode: string; label: string; hint: string }>
+  /** 压缩上下文（原状态条按钮）与会话信息（原 ⓘ 弹层）也收敛于此 */
+  onCompact: () => void
+  compacting: boolean
+  compactDisabled: boolean
+  sessionInfo: string
   onPickModel: (option: ModelOption) => void
   onPickStrength: (value: string) => void
   onPickPreset: (presetId: string) => void
+  onPickPermissionMode: (mode: string) => void
   onManagePresets: () => void
   onClose: () => void
 }
 
 export function SessionSettingsMenu({
   models, currentModelId, strength, presets, currentPresetId,
-  running, busy, onPickModel, onPickStrength, onPickPreset, onManagePresets, onClose,
+  running, busy, permissionMode, permissionModes, onCompact, compacting, compactDisabled, sessionInfo,
+  onPickModel, onPickStrength, onPickPreset, onPickPermissionMode, onManagePresets, onClose,
 }: SessionSettingsMenuProps): React.ReactElement {
   const groups = groupModelsByChannel(models)
   const singleChannel = groups.length <= 1
@@ -47,6 +57,24 @@ export function SessionSettingsMenu({
       <div className="menu wide" role="menu" aria-label="模型、推理强度与预设">
         {running && <div className="menu-note">运行中不能切换，等这轮结束再改</div>}
 
+        <div className="menu-label">权限模式</div>
+        {permissionModes.map((entry) => (
+          <button
+            key={entry.mode}
+            className={`menu-item ${entry.mode === permissionMode ? 'active' : ''}`}
+            role="menuitemradio"
+            aria-checked={entry.mode === permissionMode}
+            onClick={() => onPickPermissionMode(entry.mode)}
+          >
+            <span className="menu-item-text">
+              <span className="menu-item-label">{entry.label}</span>
+              <span className="menu-item-hint">{entry.hint}</span>
+            </span>
+            {entry.mode === permissionMode && <span className="menu-check" aria-hidden="true">✓</span>}
+          </button>
+        ))}
+
+        <div className="menu-sep" />
         <div className="menu-label">模型</div>
         {groups.length === 0 && <div className="menu-note">还没有取到可用模型</div>}
         {groups.map((group) => (
@@ -130,6 +158,20 @@ export function SessionSettingsMenu({
             <span className="menu-item-hint">新建 / 复制 / 编辑 / 设为默认</span>
           </span>
         </button>
+
+        <div className="menu-sep" />
+        <button
+          className="menu-item"
+          disabled={compactDisabled}
+          onClick={onCompact}
+          title="发送 /compact：把历史压缩成摘要，释放上下文窗口"
+        >
+          <span className="menu-item-text">
+            <span className="menu-item-label">{compacting ? '压缩中…' : '压缩上下文'}</span>
+            <span className="menu-item-hint">把历史压缩成摘要，释放上下文窗口</span>
+          </span>
+        </button>
+        <div className="menu-note">{sessionInfo}</div>
       </div>
     </>
   )

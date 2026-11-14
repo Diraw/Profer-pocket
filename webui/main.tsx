@@ -262,8 +262,6 @@ function App(): React.ReactElement {
   const [busy, setBusy] = React.useState(false)
   /** 压缩 run 飞行中：按钮自身显示「压缩中…」，run 结束自动恢复 —— 不用 notice（没人清会残留）。 */
   const [compacting, setCompacting] = React.useState(false)
-  /** 会话/构建信息弹层：调试信息不常驻状态条，点 ⓘ 查看（再点收起）。 */
-  const [metaInfoOpen, setMetaInfoOpen] = React.useState(false)
   const [acting, setActing] = React.useState(false)
   const [notice, setNotice] = React.useState('')
   const [permissions, setPermissions] = React.useState<PermissionItem[]>([])
@@ -276,7 +274,6 @@ function App(): React.ReactElement {
   const [goalEditorOpen, setGoalEditorOpen] = React.useState(false)
   const [visualizations, setVisualizations] = React.useState<VisualizationItem[]>([])
   const [attachments, setAttachments] = React.useState<StagedAttachment[]>([])
-  const [modeMenuOpen, setModeMenuOpen] = React.useState(false)
   const [switchingMode, setSwitchingMode] = React.useState(false)
   /** 模型 + 强度菜单；数据来自 list_channels（模型表）与 session_detail（当前选择） */
   const [settingsMenuOpen, setSettingsMenuOpen] = React.useState(false)
@@ -480,7 +477,6 @@ function App(): React.ReactElement {
   /** 提议不阻塞运行，所以只影响「是否渲染卡片区」，不锁输入框。 */
   const hasCards = hasPending || goalProposals.length > 0
   const permissionMode = meta?.permissionMode ?? 'bypassPermissions'
-  const currentMode = PERMISSION_MODES.find((entry) => entry.mode === permissionMode) ?? PERMISSION_MODES[1]!
   /** 图表挂在工具调用行上，靠 toolCallId 关联（消息体里没有图表数据）。 */
   const vizByTool = React.useMemo(() => {
     const map = new Map<string, VisualizationItem>()
@@ -529,15 +525,6 @@ function App(): React.ReactElement {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
-  // 菜单开着时能用 Esc 关掉，否则手机返回键/键盘都会觉得被卡住
-  React.useEffect(() => {
-    if (!modeMenuOpen) return
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setModeMenuOpen(false)
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [modeMenuOpen])
 
   // 让 reload 读到「当前持有条数」，同时避免把它塞进回调依赖 —— 否则每条消息都会重建连接 effect。
   React.useEffect(() => { heldRef.current = messages.length }, [messages])
@@ -1369,7 +1356,7 @@ function App(): React.ReactElement {
   const switchPermissionMode = React.useCallback(async (mode: SendPermissionMode): Promise<void> => {
     const client = clientRef.current
     if (!client || switchingMode) return
-    setModeMenuOpen(false)
+    setSettingsMenuOpen(false)
     if ((meta?.permissionMode ?? 'bypassPermissions') === mode) return
     setSwitchingMode(true)
     try {
@@ -1576,15 +1563,6 @@ function App(): React.ReactElement {
   return (
     <div className="app">
       <header className="topbar">
-        <button
-          className={`icon-btn ${permissionMode === 'bypassPermissions' ? '' : 'on'}`}
-          onClick={() => setModeMenuOpen((previous) => !previous)}
-          aria-expanded={modeMenuOpen}
-          aria-haspopup="menu"
-          title={`权限模式：${currentMode.label} —— ${currentMode.hint}`}
-        >
-          {currentMode.short}
-        </button>
         <div className="title-pill" title={meta?.title || sessionId}>
           <span className="title-text">{meta?.title || 'Profer 会话'}</span>
           {/* 模型与强度聚在标题下：会话的「它是什么」比标题本身还常被查 */}
@@ -1599,34 +1577,15 @@ function App(): React.ReactElement {
             {describeSessionModel(meta?.modelId, models, strength, currentPreset, presetRequired)}
           </button>
         </div>
-        <div className="conn" title={connection}>
+        {staleBundle && (
+          <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
+            ⚠ 旧版缓存
+          </span>
+        )}
+        <div className="conn" title={connected ? '已连接' : connection}>
           <span className={`conn-dot ${connected ? 'ok' : notice ? 'bad' : 'wait'}`} />
-          <span className="label">{connected ? '在线' : connection}</span>
         </div>
       </header>
-      {modeMenuOpen && (
-        <>
-          <div className="menu-scrim" onClick={() => setModeMenuOpen(false)} />
-          <div className="menu" role="menu" aria-label="权限模式">
-            {PERMISSION_MODES.map((entry) => (
-              <button
-                key={entry.mode}
-                className={`menu-item ${entry.mode === permissionMode ? 'active' : ''}`}
-                role="menuitemradio"
-                aria-checked={entry.mode === permissionMode}
-                disabled={switchingMode}
-                onClick={() => void switchPermissionMode(entry.mode)}
-              >
-                <span className="menu-item-text">
-                  <span className="menu-item-label">{entry.label}</span>
-                  <span className="menu-item-hint">{entry.hint}</span>
-                </span>
-                {entry.mode === permissionMode && <span className="menu-check" aria-hidden="true">✓</span>}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
       {settingsMenuOpen && (
         <SessionSettingsMenu
           models={models}
@@ -1636,9 +1595,16 @@ function App(): React.ReactElement {
           currentPresetId={currentPreset?.id}
           running={sessionActive}
           busy={switchingModel}
+          permissionMode={permissionMode ?? 'bypassPermissions'}
+          permissionModes={PERMISSION_MODES}
+          compacting={compacting}
+          compactDisabled={!connected || busy || hasPending || sessionActive || !meta?.channelId}
+          sessionInfo={`会话 ${sessionId ? sessionId.slice(0, 8) : '未指定'} · 构建 ${__WEBUI_BUILD__}`}
+          onCompact={() => { setSettingsMenuOpen(false); void compactContext() }}
           onPickModel={(option) => void pickModel(option)}
           onPickStrength={(value) => void pickStrength(value)}
           onPickPreset={(id) => void applyPreset(id)}
+          onPickPermissionMode={(mode) => void switchPermissionMode(mode as SendPermissionMode)}
           onManagePresets={() => { setSettingsMenuOpen(false); setPresetPanelOpen(true) }}
           onClose={() => setSettingsMenuOpen(false)}
         />
@@ -1887,44 +1853,6 @@ function App(): React.ReactElement {
             >
               {busy ? '…' : '↑'}
             </button>
-          )}
-        </div>
-        <div className="composer-meta">
-          <span>{hasPending ? '待确认' : sessionActive ? '运行中' : connected ? '空闲' : connection}</span>
-          <button
-            type="button"
-            className="compact-btn"
-            disabled={!connected || busy || hasPending || sessionActive || !meta?.channelId}
-            onClick={() => void compactContext()}
-            title={compacting
-              ? '压缩中…'
-              : sessionActive
-                ? '本轮运行中，结束后再压缩'
-                : hasPending
-                  ? '先处理上方的确认卡片'
-                  : '发送 /compact：把历史压缩成摘要，释放上下文窗口'}
-          >
-            {compacting ? '压缩中…' : '压缩上下文'}
-          </button>
-          <span className="spacer" />
-          {staleBundle && (
-            <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
-              ⚠ 旧版缓存，Ctrl+Shift+R 硬刷新
-            </span>
-          )}
-          <button
-            type="button"
-            className="meta-info"
-            aria-label="会话与版本信息"
-            onClick={() => setMetaInfoOpen((previous) => !previous)}
-          >
-            i
-          </button>
-          {metaInfoOpen && (
-            <div className="meta-popover">
-              <div>会话 {sessionId ? sessionId.slice(0, 8) : '未指定'}</div>
-              <div>构建 {__WEBUI_BUILD__}</div>
-            </div>
           )}
         </div>
       </div>
