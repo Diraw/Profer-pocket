@@ -542,16 +542,28 @@ function App(): React.ReactElement {
   }, [])
 
   /**
-   * 首屏贴底并追赶异步撑高：图片/图表卡片是加载完成后才撑高内容的，
-   * 只滚一次会停在「文字版底部」，等图片出来视口就悬在上面。
-   * 连续校准几轮；用户手动上滑（atBottomRef 被 handleStreamScroll 置 false）即停。
+   * 贴底跟随：每帧检查，内容变高的**当帧**就把 scrollTop 顶到底。
+   *
+   * 不能用定时追赶（每 350ms 跳一次底部）——内容还在撑高时视口会在
+   * 「中间 → 底部」之间反复跳动（iPhone Safari 上肉眼可见的上下闪烁）。
+   * requestAnimationFrame 回调在 paint 之前执行，同帧修正 scrollTop
+   * 不产生可见的中间态。用户手动上滑（atBottomRef 被置 false）即停。
    */
-  const pinToLatest = React.useCallback((remaining: number): void => {
-    const node = scrollRef.current
-    if (!node || !atBottomRef.current) return
-    scrollToLatest(false)
-    if (remaining > 0) window.setTimeout(() => pinToLatest(remaining - 1), 350)
-  }, [scrollToLatest])
+  React.useEffect(() => {
+    let raf = 0
+    const tick = (): void => {
+      const node = scrollRef.current
+      if (node && atBottomRef.current) {
+        const gap = node.scrollHeight - node.scrollTop - node.clientHeight
+        if (gap > 0) node.scrollTop = node.scrollHeight
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+
 
   const handleStreamScroll = (): void => {
     const node = scrollRef.current
@@ -1014,8 +1026,6 @@ function App(): React.ReactElement {
       await loadChannels(client)
       await loadPresets(client, typeof rawMeta?.workspaceSlug === 'string' ? rawMeta.workspaceSlug : undefined)
       await reload(client)
-      // 首屏贴底并追赶异步撑高（图片/图表加载），用户上滑即停
-      pinToLatest(12)
       await loadInteractions(client)
       await loadGoal(client)
       await loadGoalHistory(client)
@@ -1029,7 +1039,7 @@ function App(): React.ReactElement {
       client.disconnect()
       clientRef.current = null
     }
-  }, [sessionId, token, reload, calibrateRunning, pinToLatest, loadInteractions, loadGoal, loadGoalHistory, loadVisualizations, loadSessionMeta, loadPresets])
+  }, [sessionId, token, reload, calibrateRunning, loadInteractions, loadGoal, loadGoalHistory, loadVisualizations, loadSessionMeta, loadPresets])
 
   const respondPermission = React.useCallback(async (
     requestId: string,
