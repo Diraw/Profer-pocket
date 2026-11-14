@@ -566,21 +566,28 @@ function App(): React.ReactElement {
   /**
    * 贴底跟随：每帧检查，内容变高的**当帧**就把 scrollTop 顶到底。
    *
-   * 不能用定时追赶（每 350ms 跳一次底部）——内容还在撑高时视口会在
-   * 「中间 → 底部」之间反复跳动（iPhone Safari 上肉眼可见的上下闪烁）。
-   * requestAnimationFrame 回调在 paint 之前执行，同帧修正 scrollTop
-   * 不产生可见的中间态。用户手动上滑（atBottomRef 被置 false）即停。
+   * 两个关键语义（都由真实 bug 反推）：
+   * 1. 只在 scrollHeight **增长**时贴底 —— 不能见 gap>0 就贴，否则用户小幅
+   *    上滑的 gap 会被抢先归零、贴底状态永远为真，人就被钉在底部
+   *    （「刷新后想看历史却被钉住」）。用户滚动造成的 gap 一律不动。
+   * 2. 同帧修正（rAF 在 paint 之前执行），不产生可见中间态 —— 定时追赶
+   *    （每 350ms 跳一次底部）会在撑高期反复闪烁（iPhone 实测）。
+   *
+   * 首屏自动贴底模式（userEngaged=false）下内容增高即贴；用户首次滚动后
+   * 交还控制，只在「贴底状态且内容增高」时跟随。
    */
   React.useEffect(() => {
     let raf = 0
+    let lastHeight = 0
     const tick = (): void => {
       const node = scrollRef.current
-      if (node && (atBottomRef.current || !userEngagedRef.current)) {
-        const gap = node.scrollHeight - node.scrollTop - node.clientHeight
-        if (gap > 0) {
-          node.scrollTop = node.scrollHeight
+      if (node) {
+        const height = node.scrollHeight
+        if (height > lastHeight && (atBottomRef.current || !userEngagedRef.current)) {
+          node.scrollTop = height
           lastScrollTopRef.current = node.scrollTop
         }
+        lastHeight = height
       }
       raf = requestAnimationFrame(tick)
     }
