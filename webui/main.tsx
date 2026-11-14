@@ -1015,7 +1015,7 @@ function App(): React.ReactElement {
       await loadPresets(client, typeof rawMeta?.workspaceSlug === 'string' ? rawMeta.workspaceSlug : undefined)
       await reload(client)
       // 首屏贴底并追赶异步撑高（图片/图表加载），用户上滑即停
-      pinToLatest(8)
+      pinToLatest(12)
       await loadInteractions(client)
       await loadGoal(client)
       await loadGoalHistory(client)

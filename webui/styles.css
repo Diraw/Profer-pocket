@@ -231,6 +231,10 @@ body {
   max-height: min(72vh, 540px);
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* 关掉 Chrome/Edge 的滚动锚定：内容增高时浏览器会自动「钉住」视口元素防止跳动，
+     把贴底的滚动又拽回去（Safari 不支持锚定 —— 这正是「手机好了电脑没好」的差异）。
+     滚动位置由页面自己管理（贴底跟随 / 翻页锚点还原）。 */
+  overflow-anchor: none;
 }
 .menu-label {
   padding: 6px 10px 2px;
