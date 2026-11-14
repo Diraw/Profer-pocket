@@ -123,14 +123,15 @@ export function isTurnFinished(group: MessageGroup | undefined): boolean {
 /**
  * 这一轮是否「已经收尾到可以收起过程组」。
  *
- * 权威判据是顶层 `result`（`isTurnFinished`），但 **WebUI 拿不到它**：
- * 服务端 `projectSdkMessagesToPocketView` 只保留 user/assistant/status，
- * result / system 消息会被整条过滤掉。于是网页端这道判据永远 false，
- * 只能靠 `running` 状态；而最后一条 assistant 消息可能在 `run_completed` 之后才到，
- * 把 running 重新顶成 true —— 表现就是过程组再也不收起，正文被压在下面。
+ * 权威判据是顶层 `result`（`isTurnFinished`）——注意它在 WebUI **可用**：
+ * 消息馈送（`get_sdk_messages` 与实时流）走 `projectSdkMessageForPocket`，
+ * result 原样透传（会过滤 result 的 `projectSdkMessagesToPocketView` 是详情视图的
+ * role 映射，另一条消费路径，别看混）。
  *
- * 所以补一条**投影里仍然存在**的数据判据：最终正文已经抽出（`headline` 非空），
- * 且没有还没拿到结果的工具调用。二者同时成立时，这一轮对用户而言已经完成。
+ * isTurnSettled 在 result 之外再补一道兜底：最终正文已抽出（`headline` 非空）
+ * 且没有还没拿到结果的工具调用。二者同时成立时，这一轮对用户而言已经完成 ——
+ * 覆盖「工具被中断、结果永不落盘」（实测有 inspect_preview 无 tool_result）这类
+ * 顶层 result 因故缺席的轮次，以及 running 状态被迟到消息顶住的场景。
  * 若之后又来了新工具调用，`findHeadlineRange` 会把这段 text 重新收回 `items`，
  * headline 变空，过程组自然再展开 —— 不会误伤仍在继续的一轮。
  */
@@ -158,7 +159,8 @@ export function isTurnSettled(
  * 中途（被中断、结果永不落盘）缺失结果的工具不算 pending —— 真实会话里，还在飞的工具
  * 永远追加在末尾，丢失的结果只会出现在中间。用「末尾工具未完成」当 liveness 信号，既能
  * 在跑完时正确收尾，也不会被一个早夭的中间工具卡住（`findHeadlineRange` 的严格分支就
- * 是被这种缺失结果误伤的：WebUI 拿不到顶层 result，严格分支要求所有工具结果到齐，于是
+ * 是被这种缺失结果误伤的：严格分支要求所有工具结果到齐（缺结果的轮次即便有顶层 result，
+ * finished 标志也只放宽「结果到齐」而非「文本之后只允许 thinking」），于是
  * 整段最终正文被判成「还在过程里」而消失）。
  */
 export function turnHasTrailingPendingTool(group: MessageGroup | undefined): boolean {

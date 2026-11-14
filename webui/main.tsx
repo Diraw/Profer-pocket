@@ -351,10 +351,10 @@ function App(): React.ReactElement {
    * 曾被节流整条吞掉（连 setRunning(false) 都不执行）。
    *
    * 所以对外表现统一叠一道数据判据：最后一轮已收尾，就不再当作运行中。
-   * 注意 **WebUI 看不到顶层 result**：服务端 `projectSdkMessagesToPocketView`
-   * 只保留 user/assistant/status，result 被整条过滤。旧实现只用 isTurnFinished
-   * 判「已收尾」，在网页端恒为 false，等于没加这道判据 —— 这正是问题反复出现的原因。
-   * 改用 isTurnSettled：有 result 就用 result，否则看「最终正文已抽出且没有未完成工具」。
+   * 注意：result 在 WebUI **能看到**（消息馈送走 projectSdkMessageForPocket，
+   * 会过滤 result 的 projectSdkMessagesToPocketView 是详情视图那条路 —— 别看混）。
+   * isTurnSettled 在 result 之外再兜一层「最终正文已抽出且没有未完成工具」，
+   * 覆盖缺结果/被中断的轮次与 running 被迟到消息顶住的场景。
    *
    * 只看「最后一条 user / assistant-turn」：尾部可能挂着 system 消息，它们既不属于
    * 对话也不算收尾；而刚发出新消息时最后一条是 user，必须判定为「在跑」。
@@ -588,8 +588,6 @@ function App(): React.ReactElement {
     return () => cancelAnimationFrame(raf)
   }, [])
 
-
-
   const handleStreamScroll = (): void => {
     const node = scrollRef.current
     if (!node) return
@@ -628,7 +626,7 @@ function App(): React.ReactElement {
         const local = localScript?.match(/(index-[^/]+\.js)/)?.[1]
         const stale = Boolean(remote && local && remote !== local)
         setStaleBundle(stale)
-        // 自动换新：旧包页面拉到新 index.html 后直接 reload（localStorage 防循环）。
+        // 自动换新：旧包页面拉到新 index.html 后直接 reload（sessionStorage 防循环）。
         // 否则「改了但页面没刷上」会无限来回 —— 旧包里没有这段逻辑救不了自己，
         // 从这版起任何「至少是本版」的页面都能自愈。
         if (stale) {
