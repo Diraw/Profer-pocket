@@ -111,40 +111,49 @@ body {
   min-height: 64px;
   padding: var(--sp-3) var(--gutter-right) var(--sp-3) var(--gutter-left);
 }
-.topbar-left,
-.topbar-right {
-  flex: none;
-  display: flex;
-  align-items: center;
-  min-width: 0;
-}
 .topbar .title-pill {
   flex: 1;
   min-width: 0;
 }
-/* 「+」圆钮：设定目标入口，与输入条圆键同材质 */
-.icon-btn.add {
-  font-size: 20px;
-  color: var(--ink);
-}
 
-/* 聊天标题：与输入条、圆键同一材质（lowest + 细边线 + 轻投影） */
+/* 聊天标题：与输入条、圆键同一材质（lowest + 细边线 + 轻投影）。
+   一横排：标题 · 模型 · ＋ 目标 · 连接点，全部收进这一个圆框。 */
 .title-pill {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  gap: 1px;
+  gap: var(--sp-2);
   min-width: 0;
-  padding: 6px var(--sp-4);
+  padding: 6px 10px 6px var(--sp-4);
   border: 1px solid var(--hairline);
   border-radius: var(--r-pill);
   background: var(--surface-lowest);
   box-shadow: var(--float-shadow);
-  text-align: center;
 }
-/* 模型 + 强度：放在标题下面一行。会话「是什么模型」比标题更常被查，又不该另占一行工具栏 */
+.pill-spacer { flex: 1; min-width: var(--sp-2); }
+/* 框内小加钮：设定目标 */
+.pill-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.pill-icon:hover { color: var(--ink); border-color: var(--outline); }
+/* 模型 + 强度：与标题同行，中间的「·」分隔由文案自带 */
 .model-chip {
-  max-width: 100%;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
   padding: 0 2px;
   border: 0;
   background: transparent;
@@ -165,7 +174,8 @@ body {
 .model-chip:hover:not(:disabled) { color: var(--ink); }
 .model-chip:disabled { opacity: .55; }
 .title-text {
-  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   font-size: 14px;
   font-weight: 500;
@@ -1506,14 +1516,10 @@ button:focus-visible, .send-btn:focus-visible, .icon-btn:focus-visible { outline
   -webkit-user-select: text;
 }
 .stale-badge {
-  margin-left: 8px;
-  align-self: center;
-  white-space: nowrap;
-  padding: 1px 8px;
-  border: 1px solid #e89b91;
-  border-radius: 6px;
-  color: #e89b91;
-  font-size: 10px;
+  flex: none;
+  color: var(--error);
+  font-size: 11px;
+  cursor: help;
 }
 .diag-pill {
   position: fixed;

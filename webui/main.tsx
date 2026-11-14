@@ -1565,22 +1565,9 @@ function App(): React.ReactElement {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="topbar-left">
-          {connected && !goal && (
-            <button
-              type="button"
-              className="icon-btn add"
-              onClick={() => setGoalOpen((previous) => !previous)}
-              title="设定目标"
-              aria-label="设定目标"
-            >
-              +
-            </button>
-          )}
-        </div>
+        {/* 一个圆框一横排：标题 · 模型 · ＋ 目标 · 连接点 */}
         <div className="title-pill" title={meta?.title || sessionId}>
           <span className="title-text">{meta?.title || 'Profer 会话'}</span>
-          {/* 模型与强度聚在标题下：会话的「它是什么」比标题本身还常被查 */}
           <button
             className="model-chip"
             onClick={() => setSettingsMenuOpen((previous) => !previous)}
@@ -1591,16 +1578,27 @@ function App(): React.ReactElement {
           >
             {describeSessionModel(meta?.modelId, models, strength, currentPreset, presetRequired)}
           </button>
-        </div>
-        <div className="topbar-right">
+          <span className="pill-spacer" />
           {staleBundle && (
             <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
-              ⚠ 旧版缓存
+              ⚠
             </span>
           )}
-          <div className="conn" title={connected ? '已连接' : connection}>
-            <span className={`conn-dot ${connected ? 'ok' : notice ? 'bad' : 'wait'}`} />
-          </div>
+          {connected && !goal && (
+            <button
+              type="button"
+              className="pill-icon"
+              onClick={() => setGoalOpen((previous) => !previous)}
+              title="设定目标"
+              aria-label="设定目标"
+            >
+              +
+            </button>
+          )}
+          <span
+            className={`conn-dot ${connected ? 'ok' : notice ? 'bad' : 'wait'}`}
+            title={connected ? '已连接' : connection}
+          />
         </div>
       </header>
       {settingsMenuOpen && (
