@@ -260,6 +260,8 @@ function App(): React.ReactElement {
   const lastHeadlineLenRef = React.useRef(0)
   const [input, setInput] = React.useState('')
   const [busy, setBusy] = React.useState(false)
+  /** 压缩 run 飞行中：按钮自身显示「压缩中…」，run 结束自动恢复 —— 不用 notice（没人清会残留）。 */
+  const [compacting, setCompacting] = React.useState(false)
   const [acting, setActing] = React.useState(false)
   const [notice, setNotice] = React.useState('')
   const [permissions, setPermissions] = React.useState<PermissionItem[]>([])
@@ -1031,6 +1033,7 @@ function App(): React.ReactElement {
         // 第二轮的 completion 不生效，过程组就一直保持展开。
         if (type === 'run_completed' || type === 'run_idle') {
           setRunning(false)
+          setCompacting(false)
           const now = Date.now()
           if (now - lastCompletedRef.current > 3000) {
             lastCompletedRef.current = now
@@ -1509,8 +1512,9 @@ function App(): React.ReactElement {
         clientKind: 'webui',
       })
       setRunning(true)
-      setNotice('正在压缩上下文…')
+      setCompacting(true)
     } catch (error) {
+      setCompacting(false)
       setNotice(`压缩失败：${error instanceof Error ? error.message : String(error)}`)
     } finally {
       setBusy(false)
@@ -1883,13 +1887,15 @@ function App(): React.ReactElement {
             className="compact-btn"
             disabled={!connected || busy || hasPending || sessionActive || !meta?.channelId}
             onClick={() => void compactContext()}
-            title={sessionActive
-              ? '本轮运行中，结束后再压缩'
-              : hasPending
-                ? '先处理上方的确认卡片'
-                : '发送 /compact：把历史压缩成摘要，释放上下文窗口'}
+            title={compacting
+              ? '压缩中…'
+              : sessionActive
+                ? '本轮运行中，结束后再压缩'
+                : hasPending
+                  ? '先处理上方的确认卡片'
+                  : '发送 /compact：把历史压缩成摘要，释放上下文窗口'}
           >
-            压缩上下文
+            {compacting ? '压缩中…' : '压缩上下文'}
           </button>
           <span className="spacer" />
           <span title={sessionId}>会话 {sessionId ? sessionId.slice(0, 8) : '未指定'}</span>
