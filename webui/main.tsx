@@ -1578,13 +1578,8 @@ function App(): React.ReactElement {
           >
             {describeSessionModel(meta?.modelId, models, strength, currentPreset, presetRequired)}
           </button>
-          {/* 右侧固定：＋ 目标与连接绿点，不参与两行居中 */}
+          {/* 左右固定：＋ 目标在最左、连接绿点在最右，不参与两行居中 */}
           <div className="pill-aside">
-            {staleBundle && (
-              <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
-                ⚠
-              </span>
-            )}
             {connected && !goal && (
               <button
                 type="button"
@@ -1595,6 +1590,13 @@ function App(): React.ReactElement {
               >
                 +
               </button>
+            )}
+          </div>
+          <div className="pill-aside right">
+            {staleBundle && (
+              <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
+                ⚠
+              </span>
             )}
             <span
               className={`conn-dot ${connected ? 'ok' : notice ? 'bad' : 'wait'}`}
