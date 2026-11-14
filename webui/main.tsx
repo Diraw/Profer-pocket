@@ -1802,8 +1802,13 @@ function App(): React.ReactElement {
           )}
         </div>
         {jumpVisible && (
-          <button className="jump-latest" onClick={() => scrollToLatest(true)}>
-            ↓ 回到最新
+          <button
+            className="jump-latest"
+            onClick={() => scrollToLatest(true)}
+            title="回到最新"
+            aria-label="回到最新"
+          >
+            ↓
           </button>
         )}
       </div>

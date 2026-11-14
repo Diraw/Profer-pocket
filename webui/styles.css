@@ -564,20 +564,23 @@ body {
 /* ===== 消息区 + 回到最新 ===== */
 .stage { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .jump-latest {
+  /* 只要一个下拉箭头：40px 圆钮（与输入条圆键同材质） */
   position: absolute;
   bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px var(--sp-4);
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
   border: 1px solid var(--hairline);
   border-radius: var(--r-pill);
   background: var(--surface-lowest);
   box-shadow: var(--float-shadow);
   color: var(--ink);
-  font-size: 12px;
+  font-size: 15px;
 }
 
 /* ===== 输入区：56px 胶囊 + 40px 圆键（圆角 28 = 键半径 20 + 8） ===== */
