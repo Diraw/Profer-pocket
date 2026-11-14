@@ -607,7 +607,18 @@ function App(): React.ReactElement {
           .map((node) => (node as HTMLScriptElement).src)
           .find((src) => /index-[^/]+\.js/.test(src))
         const local = localScript?.match(/(index-[^/]+\.js)/)?.[1]
-        setStaleBundle(Boolean(remote && local && remote !== local))
+        const stale = Boolean(remote && local && remote !== local)
+        setStaleBundle(stale)
+        // 自动换新：旧包页面拉到新 index.html 后直接 reload（localStorage 防循环）。
+        // 否则「改了但页面没刷上」会无限来回 —— 旧包里没有这段逻辑救不了自己，
+        // 从这版起任何「至少是本版」的页面都能自愈。
+        if (stale) {
+          const key = `profer-webui-stale-reload:${remote}`
+          if (!sessionStorage.getItem(key)) {
+            sessionStorage.setItem(key, '1')
+            window.location.reload()
+          }
+        }
       } catch {
         /* 自检失败不影响使用 */
       }
