@@ -294,6 +294,8 @@ function App(): React.ReactElement {
   const lastCompletedRef = React.useRef(0)
   /** 是否贴着底部。用户上滑阅读时不跟随新内容，只露出「回到最新」。 */
   const atBottomRef = React.useRef(true)
+  /** 上次已知的 scrollTop：区分「用户滚动」与「布局撑高引发的 scroll 事件」。 */
+  const lastScrollTopRef = React.useRef(0)
   const [jumpVisible, setJumpVisible] = React.useState(false)
   const [pageStart, setPageStart] = React.useState(0)
   const [hasOlder, setHasOlder] = React.useState(false)
@@ -526,7 +528,10 @@ function App(): React.ReactElement {
     if (anchor === null) return
     prependAnchorRef.current = null
     const node = scrollRef.current
-    if (node) node.scrollTop = node.scrollHeight - anchor
+    if (node) {
+      node.scrollTop = node.scrollHeight - anchor
+      lastScrollTopRef.current = node.scrollTop
+    }
   }, [messages])
 
   /**
@@ -537,6 +542,7 @@ function App(): React.ReactElement {
     const node = scrollRef.current
     if (!node) return
     node.scrollTo({ top: node.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
+    lastScrollTopRef.current = node.scrollTop
     atBottomRef.current = true
     setJumpVisible(false)
   }, [])
@@ -555,7 +561,10 @@ function App(): React.ReactElement {
       const node = scrollRef.current
       if (node && atBottomRef.current) {
         const gap = node.scrollHeight - node.scrollTop - node.clientHeight
-        if (gap > 0) node.scrollTop = node.scrollHeight
+        if (gap > 0) {
+          node.scrollTop = node.scrollHeight
+          lastScrollTopRef.current = node.scrollTop
+        }
       }
       raf = requestAnimationFrame(tick)
     }
@@ -568,6 +577,11 @@ function App(): React.ReactElement {
   const handleStreamScroll = (): void => {
     const node = scrollRef.current
     if (!node) return
+    // scrollTop 未变的 scroll 事件是「布局撑高」（图片/卡片异步加载）引发的，
+    // 不是用户滚动。iOS Safari 会触发这类事件 —— 不许据此改 atBottomRef，
+    // 否则贴底跟随被误停，上方继续增高时视口就悬在「上面」。
+    if (node.scrollTop === lastScrollTopRef.current) return
+    lastScrollTopRef.current = node.scrollTop
     const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 48
     atBottomRef.current = atBottom
     // 只在可见性真变化时 setState，否则滚动过程中每次都重渲染整个消息树。
