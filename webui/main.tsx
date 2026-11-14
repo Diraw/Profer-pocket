@@ -630,6 +630,11 @@ function App(): React.ReactElement {
       )
       diagEvent(`reload(${mode}) → ${page.messages.length} 条`)
       if (mode === 'merge') {
+        // merge 可能把「页面窗口比当前持有的更早的那几十条」补进头部（尾窗滑动）——
+        // 先记距底距离，DOM 更新后由 prependAnchor 的 layoutEffect 还原，
+        // 否则视口整体被顶到上面（「刷新后先在底部、等一会儿又跳到上面」的根因）。
+        const node = scrollRef.current
+        prependAnchorRef.current = node ? node.scrollHeight - node.scrollTop : null
         setMessages((previous) => mergeReloadPage(previous, page.messages))
       } else {
         setMessages(page.messages)
