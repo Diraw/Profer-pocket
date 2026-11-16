@@ -126,8 +126,8 @@ export function niceCeil(value: number): number {
 const TICKS = 5
 const CHART_H = 300
 const PAD = { top: 14, right: 14, bottom: 44, left: 40 }
-const BAR_COLOR = '#7fb3d5'
-const LINE_COLORS = ['#7fb3d5', '#86c7a2', '#ddb271', '#e89b91']
+/* 图表色跟随主题：复用语义 token，浅色下自动换成更深的一档 */
+const LINE_COLORS = ['var(--info)', 'var(--success)', 'var(--warning)', 'var(--error)']
 
 function tickLabel(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1)
@@ -152,8 +152,8 @@ function ValueAxis({ max, left, right, top, bottom }: {
         const y = top + (bottom - top) * (1 - value / max)
         return (
           <g key={index}>
-            <line x1={left} x2={right} y1={y} y2={y} stroke="#312f2b" strokeWidth={1} />
-            <text x={left - 6} y={y + 3.5} fill="#aaa7a1" fontSize={10} textAnchor="end">{tickLabel(value)}</text>
+            <line x1={left} x2={right} y1={y} y2={y} className="viz-grid" />
+            <text x={left - 6} y={y + 3.5} className="viz-tick" textAnchor="end">{tickLabel(value)}</text>
           </g>
         )
       })}
@@ -191,15 +191,14 @@ function VerticalBars({ spec }: { spec: ChartSpec }): React.ReactElement {
                   width={Math.max(barW - 2, 1)}
                   height={Math.max(height, 0)}
                   rx={2}
-                  fill={LINE_COLORS[seriesIndex % LINE_COLORS.length]}
+                  style={{ fill: LINE_COLORS[seriesIndex % LINE_COLORS.length] }}
                 />
               )
             })}
             <text
               x={center}
               y={CHART_H - PAD.bottom + 16}
-              fill="#aaa7a1"
-              fontSize={10}
+              className="viz-tick"
               textAnchor="middle"
             >
               {truncate(labels[rowIndex] ?? '', 6)}
@@ -208,7 +207,7 @@ function VerticalBars({ spec }: { spec: ChartSpec }): React.ReactElement {
         )
       })}
       {spec.xAxisLabel && (
-        <text x={PAD.left + plotW / 2} y={CHART_H - 6} fill="#7d7a75" fontSize={10} textAnchor="middle">
+        <text x={PAD.left + plotW / 2} y={CHART_H - 6} className="viz-axis-label" textAnchor="middle">
           {spec.xAxisLabel}
         </text>
       )}
@@ -234,8 +233,8 @@ function HorizontalBars({ spec }: { spec: ChartSpec }): React.ReactElement {
         const x = padLeft + plotW * (value / max)
         return (
           <g key={index}>
-            <line x1={x} x2={x} y1={8} y2={height - 24} stroke="#312f2b" strokeWidth={1} />
-            <text x={x} y={height - 10} fill="#aaa7a1" fontSize={10} textAnchor="middle">{tickLabel(value)}</text>
+            <line x1={x} x2={x} y1={8} y2={height - 24} className="viz-grid" />
+            <text x={x} y={height - 10} className="viz-tick" textAnchor="middle">{tickLabel(value)}</text>
           </g>
         )
       })}
@@ -243,7 +242,7 @@ function HorizontalBars({ spec }: { spec: ChartSpec }): React.ReactElement {
         const center = 8 + band * rowIndex + band / 2
         return (
           <g key={rowIndex}>
-            <text x={padLeft - 8} y={center + 3.5} fill="#aaa7a1" fontSize={10} textAnchor="end">
+            <text x={padLeft - 8} y={center + 3.5} className="viz-tick" textAnchor="end">
               {truncate(labels[rowIndex] ?? '', 8)}
             </text>
             {series.map((entry, seriesIndex) => {
@@ -256,7 +255,7 @@ function HorizontalBars({ spec }: { spec: ChartSpec }): React.ReactElement {
                   width={Math.max(plotW * (value / max), 0)}
                   height={Math.max(barH - 2, 1)}
                   rx={2}
-                  fill={LINE_COLORS[seriesIndex % LINE_COLORS.length]}
+                  style={{ fill: LINE_COLORS[seriesIndex % LINE_COLORS.length] }}
                 />
               )
             })}
@@ -290,10 +289,10 @@ function LineChart({ spec }: { spec: ChartSpec }): React.ReactElement {
           .join(' ')
         return (
           <g key={entry.dataKey}>
-            <polyline points={points} fill="none" stroke={LINE_COLORS[seriesIndex % LINE_COLORS.length]} strokeWidth={2} />
+            <polyline points={points} fill="none" style={{ stroke: LINE_COLORS[seriesIndex % LINE_COLORS.length] }} strokeWidth={2} />
             {spec.data.map((row, rowIndex) => {
               const [x, y] = pointAt(rowIndex, toNumber(row[entry.dataKey]))
-              return <circle key={rowIndex} cx={x} cy={y} r={3} fill={LINE_COLORS[seriesIndex % LINE_COLORS.length]} />
+              return <circle key={rowIndex} cx={x} cy={y} r={3} style={{ fill: LINE_COLORS[seriesIndex % LINE_COLORS.length] }} />
             })}
           </g>
         )
@@ -303,8 +302,7 @@ function LineChart({ spec }: { spec: ChartSpec }): React.ReactElement {
           key={index}
           x={PAD.left + band * index + band / 2}
           y={CHART_H - PAD.bottom + 16}
-          fill="#aaa7a1"
-          fontSize={10}
+          className="viz-tick"
           textAnchor="middle"
         >
           {truncate(label, 6)}
@@ -346,7 +344,7 @@ function PieChart({ spec }: { spec: ChartSpec }): React.ReactElement {
     <div className="viz-pie">
       <svg viewBox={`0 0 ${size} ${size}`} role="img" aria-label="饼图">
         {slices.map((slice) => (
-          <path key={slice.key} d={slice.path} fill={LINE_COLORS[slice.key % LINE_COLORS.length]} stroke="#191715" strokeWidth={1} />
+          <path key={slice.key} d={slice.path} className="viz-slice" style={{ fill: LINE_COLORS[slice.key % LINE_COLORS.length] }} />
         ))}
       </svg>
       <ul className="viz-legend">
@@ -467,49 +465,4 @@ export function VisualizationList({ items }: { items: VisualizationItem[] }): Re
       {sorted.map((item) => <VisualizationCard key={item.id} item={item} />)}
     </div>
   )
-}
-
-/**
- * 给「挂不回工具行」的图表找插入位置。
- *
- * 分页只保留消息尾部，所以挂不回去的图表几乎都属于**更早**的回合。
- * 旧实现把它们统一追加到消息流末尾，结果一张很早的图出现在所有对话之后 ——
- * 看起来就像图表自己「跑到了最下面」。这里按 createdAt 插到第一个不早于它的
- * 回合之前；没有可用时间戳时一律退化到最前，绝不丢到最后。
- *
- * @param turnTimes 每个回合的时间戳（毫秒），下标与回合下标一致；无法取到的用 undefined
- * @returns 插入位置（0..turnTimes.length）→ 该位置要插入的图表
- */
-export function placeOrphanVisualizations(
-  orphans: readonly VisualizationItem[],
-  turnTimes: ReadonlyArray<number | undefined>,
-): Map<number, VisualizationItem[]> {
-  const slots = new Map<number, VisualizationItem[]>()
-  const push = (index: number, item: VisualizationItem): void => {
-    const bucket = slots.get(index)
-    if (bucket) bucket.push(item)
-    else slots.set(index, [item])
-  }
-  const hasUsableTimes = turnTimes.some((at) => typeof at === 'number' && Number.isFinite(at) && at > 0)
-
-  for (const item of orphans) {
-    const createdAt = typeof item.createdAt === 'number' && Number.isFinite(item.createdAt)
-      ? item.createdAt
-      : 0
-    if (!hasUsableTimes || createdAt <= 0) {
-      // 拿不到时间就当它属于尚未加载的早期回合
-      push(0, item)
-      continue
-    }
-    let insertAt = turnTimes.length
-    for (let index = 0; index < turnTimes.length; index++) {
-      const at = turnTimes[index]
-      if (typeof at !== 'number' || !Number.isFinite(at) || at <= 0) continue
-      if (at >= createdAt) { insertAt = index; break }
-    }
-    push(insertAt, item)
-  }
-
-  for (const bucket of slots.values()) bucket.sort((a, b) => a.createdAt - b.createdAt)
-  return slots
 }

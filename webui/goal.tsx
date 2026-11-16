@@ -9,6 +9,7 @@
  * 判定口径（可执行动作、预算耗尽、状态文案）都在 `goal-model.ts` 里，有单测钉住。
  */
 import * as React from 'react'
+import { useOverlay } from './overlay'
 import {
   GOAL_CONTRACT_MAX_CHARS,
   budgetExhaustedReasons,
@@ -298,6 +299,8 @@ export function GoalEditor({ goal, busy, onClose, onSave }: {
   })
   const [limits, setLimits] = React.useState<GoalLimitsFormInput>(() => goalLimitsFormValue(goal.limits))
   const [error, setError] = React.useState('')
+  // 保存中不响应 Esc：与预设面板同一口径
+  const sheetRef = useOverlay(onClose, !busy)
   const actions = goalActionState(goal)
   const canResumeAfterSave = actions.canResume || actions.budgetEditRequired
 
@@ -346,7 +349,7 @@ export function GoalEditor({ goal, busy, onClose, onSave }: {
   return (
     <>
       <div className="sheet-scrim" onClick={() => { if (!busy) onClose() }} />
-      <div className="sheet" role="dialog" aria-modal="true" aria-label="编辑目标、契约与预算">
+      <div className="sheet" role="dialog" aria-modal="true" aria-label="编辑目标、契约与预算" ref={sheetRef} tabIndex={-1}>
         <div className="sheet-head">
           <strong>编辑目标、契约与预算</strong>
           <span className="sheet-desc">沿用当前会话上下文与已有执行历史；修改只在非运行时生效。</span>

@@ -1,8 +1,8 @@
 /**
- * 「模型 + 推理强度」选择菜单。
+ * 会话设置菜单（挂在标题下面那一行）：目标 / 权限模式 / 模型 / 推理强度 / 预设 / 压缩。
  *
- * 一个菜单放两件事，是因为它们语义相邻（换模型常常要连档位一起调），
- * 而且手机上多一层二级页面就多一次往返。分区用细线与小标题隔开。
+ * 一个菜单放这么多，是因为它们都是「改这个会话怎么跑」的开关，语义相邻；
+ * 手机上多一层二级页面就多一次往返。分区用细线与小标题隔开。
  *
  * 运行中一律禁用：服务端对 model / effort 的更新都有「运行中拒绝」的校验，
  * 与其让用户点完吃一个错误横幅，不如直接说明。
@@ -15,6 +15,8 @@ import {
   type StrengthState,
 } from './model-selection'
 import { presetBadges, type WebPreset } from './preset-model'
+import { useOverlay } from './overlay'
+import { formatTokens, type ContextUsageInfo } from './context-usage'
 
 export interface SessionSettingsMenuProps {
   models: ModelOption[]
@@ -29,11 +31,17 @@ export interface SessionSettingsMenuProps {
   /** 权限模式（原顶栏「自动」按钮，收敛进本菜单保持顶栏干净） */
   permissionMode: string
   permissionModes: ReadonlyArray<{ mode: string; label: string; hint: string }>
-  /** 压缩上下文（原状态条按钮）与会话信息（原 ⓘ 弹层）也收敛于此 */
+  /** 目标（原顶栏左上的「＋」）也收敛于此：低频动作不占常显按钮 */
+  hasGoal: boolean
+  onOpenGoal: () => void
+  /** 压缩上下文（原状态条按钮）收敛于此 */
   onCompact: () => void
   compacting: boolean
   compactDisabled: boolean
-  sessionInfo: string
+  /** 上下文占用：写在压缩项里，让顶栏那个百分比有明确所指 */
+  contextUsage?: ContextUsageInfo
+  /** 由顶栏百分比点进来：打开后把压缩项滚进视野并短暂高亮 */
+  focusCompact?: boolean
   onPickModel: (option: ModelOption) => void
   onPickStrength: (value: string) => void
   onPickPreset: (presetId: string) => void
@@ -44,19 +52,38 @@ export interface SessionSettingsMenuProps {
 
 export function SessionSettingsMenu({
   models, currentModelId, strength, presets, currentPresetId,
-  running, busy, permissionMode, permissionModes, onCompact, compacting, compactDisabled, sessionInfo,
-  onPickModel, onPickStrength, onPickPreset, onPickPermissionMode, onManagePresets, onClose,
+  running, busy, permissionMode, permissionModes, hasGoal, onOpenGoal, onCompact, compacting, compactDisabled,
+  contextUsage, focusCompact, onPickModel, onPickStrength, onPickPreset, onPickPermissionMode, onManagePresets, onClose,
 }: SessionSettingsMenuProps): React.ReactElement {
   const groups = groupModelsByChannel(models)
   const singleChannel = groups.length <= 1
   const locked = running || busy
+  // 覆盖层的键盘行为统一走 overlay.ts：Esc 关闭 + 打开即聚焦
+  const overlayRef = useOverlay(onClose)
+  /** 菜单是 overflow-y 容器，压缩项在最底部；从顶栏百分比进来时主动滚过去并高亮一下 */
+  const compactRef = React.useRef<HTMLButtonElement | null>(null)
+  React.useEffect(() => {
+    if (!focusCompact) return
+    const node = compactRef.current
+    if (!node) return
+    node.scrollIntoView({ block: 'center' })
+    node.focus({ preventScroll: true })
+  }, [focusCompact])
 
   return (
     <>
       <div className="menu-scrim" onClick={onClose} />
-      <div className="menu wide" role="menu" aria-label="模型、推理强度与预设">
+      <div className="menu wide" role="menu" aria-label="模型、推理强度与预设" ref={overlayRef} tabIndex={-1}>
         {running && <div className="menu-note">运行中不能切换，等这轮结束再改</div>}
 
+        <button className="menu-item" onClick={onOpenGoal}>
+          <span className="menu-item-text">
+            <span className="menu-item-label">{hasGoal ? '编辑目标' : '设定目标'}</span>
+            <span className="menu-item-hint">{hasGoal ? '改目标、契约与预算' : '让 Profer 持续多轮执行直到完成'}</span>
+          </span>
+        </button>
+
+        <div className="menu-sep" />
         <div className="menu-label">权限模式</div>
         {permissionModes.map((entry) => (
           <button
@@ -161,17 +188,28 @@ export function SessionSettingsMenu({
 
         <div className="menu-sep" />
         <button
-          className="menu-item"
+          ref={compactRef}
+          className={`menu-item${focusCompact ? ' compact-focus' : ''}`}
           disabled={compactDisabled}
           onClick={onCompact}
           title="发送 /compact：把历史压缩成摘要，释放上下文窗口"
         >
           <span className="menu-item-text">
-            <span className="menu-item-label">{compacting ? '压缩中…' : '压缩上下文'}</span>
-            <span className="menu-item-hint">把历史压缩成摘要，释放上下文窗口</span>
+            <span className="menu-item-label">
+              {compacting ? '压缩中…' : '压缩上下文'}
+              {contextUsage?.percent != null && (
+                <span className={`compact-usage${contextUsage.warning ? ' warn' : ''}`}>
+                  {contextUsage.percent}%
+                </span>
+              )}
+            </span>
+            <span className="menu-item-hint">
+              {contextUsage?.percent != null
+                ? `已用 ${formatTokens(contextUsage.used)} / ${formatTokens(contextUsage.window)} tokens（${contextUsage.percent}%），压缩可释放`
+                : '把历史压缩成摘要，释放上下文窗口'}
+            </span>
           </span>
         </button>
-        <div className="menu-note">{sessionInfo}</div>
       </div>
     </>
   )

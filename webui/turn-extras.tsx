@@ -7,6 +7,13 @@
 import * as React from 'react'
 import type { MessageGroup } from '@profer/session-core'
 import { isImageAttachment, parseAttachedFiles, type AttachedFileRef } from './attachments'
+import { createLruCache } from './image-cache'
+
+/**
+ * 图片缓存条数上限。按「一张截图 1-3MB」估，40 条最坏也就一百多 MB；
+ * 真机的长会话里能同时命中的通常只有最近十来张。
+ */
+const IMAGE_CACHE_LIMIT = 40
 
 /** 主仓 group.ts 的 USER_CONTEXT_BLOCK_PATTERNS；pocket 的 toTranscript 少剥了后两个。 */
 export function stripContextBlocks(text: string): string {
@@ -202,7 +209,7 @@ export function TurnAttachments({ files }: { files: AttachedFileRef[] }): React.
 }
 
 /** 图片 data URL 缓存：同一张图在多次重渲染 / 重新加载历史时不重复走 WS。 */
-const IMAGE_CACHE = new Map<string, string>()
+const IMAGE_CACHE = createLruCache<string>(IMAGE_CACHE_LIMIT)
 
 /**
  * 图片读取结果必须三分：ok / pending / error。

@@ -18,6 +18,7 @@ import {
   type PresetPatch,
   type WebPreset,
 } from './preset-model'
+import { useOverlay } from './overlay'
 import type { ModelOption } from './model-selection'
 
 type View = { kind: 'list' } | { kind: 'edit'; preset: WebPreset } | { kind: 'new'; preset?: WebPreset }
@@ -194,6 +195,8 @@ export function PresetPanel({
 }: PresetPanelProps): React.ReactElement {
   const [view, setView] = React.useState<View>({ kind: 'list' })
   const [notice, setNotice] = React.useState('')
+  // 提交中（busy）不响应 Esc：避免保存到一半被关掉，状态停在未知处
+  const sheetRef = useOverlay(onClose, !busy)
 
   const copyAndEdit = async (preset: WebPreset): Promise<void> => {
     const created = await onCopy(preset.id)
@@ -204,7 +207,7 @@ export function PresetPanel({
   return (
     <>
       <div className="sheet-scrim" onClick={() => { if (!busy) onClose() }} />
-      <div className="sheet preset-sheet" role="dialog" aria-modal="true" aria-label="预设管理">
+      <div className="sheet preset-sheet" role="dialog" aria-modal="true" aria-label="预设管理" ref={sheetRef} tabIndex={-1}>
         {view.kind === 'list' ? (
           <>
             <div className="preset-head">

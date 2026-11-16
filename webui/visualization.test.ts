@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { niceCeil, normalizeVisualizations, placeOrphanVisualizations, toCsv } from './visualization'
+import { niceCeil, normalizeVisualizations, toCsv } from './visualization'
 
 /** 桌面端写入的一条图表记录（present_visualization 落盘后的形状）。 */
 function barRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -103,50 +103,5 @@ describe('CSV 导出', () => {
     }
     const csv = toCsv(spec)
     expect(csv).toContain('"a,b","他说""好"""')
-  })
-})
-
-describe('孤儿图表的插入位置', () => {
-  const viz = (id: string, createdAt: number) => ({ id, toolCallId: `t-${id}`, title: id, createdAt })
-
-  test('Given 图表早于所有已加载回合 When 定位 Then 插到最前（绝不跑到最后）', () => {
-    const slots = placeOrphanVisualizations([viz('a', 1000)], [2000, 3000, 4000])
-    expect([...slots.keys()]).toEqual([0])
-    expect(slots.get(0)?.map((item) => item.id)).toEqual(['a'])
-    expect(slots.has(3)).toBe(false)
-  })
-
-  test('Given 图表落在两个回合之间 When 定位 Then 插到第一个不早于它的回合前', () => {
-    const slots = placeOrphanVisualizations([viz('a', 2500)], [1000, 2000, 3000, 4000])
-    expect([...slots.keys()]).toEqual([2])
-  })
-
-  test('Given 图表比所有回合都新 When 定位 Then 才允许插到末尾', () => {
-    const slots = placeOrphanVisualizations([viz('a', 9000)], [1000, 2000])
-    expect([...slots.keys()]).toEqual([2])
-  })
-
-  test('Given 多个图表不同时间 When 定位 Then 分槽且槽内按时间升序', () => {
-    const slots = placeOrphanVisualizations(
-      [viz('c', 3500), viz('a', 500), viz('b', 600), viz('d', 8000)],
-      [1000, 2000, 4000],
-    )
-    expect(slots.get(0)?.map((item) => item.id)).toEqual(['a', 'b'])
-    expect(slots.get(2)?.map((item) => item.id)).toEqual(['c'])
-    expect(slots.get(3)?.map((item) => item.id)).toEqual(['d'])
-  })
-
-  test('Given 回合时间戳全部缺失 When 定位 Then 退化到最前，不追加到末尾', () => {
-    const slots = placeOrphanVisualizations([viz('a', 5000)], [undefined, undefined])
-    expect([...slots.keys()]).toEqual([0])
-  })
-
-  test('Given 图表自身没有时间 When 定位 Then 同样当早期图表处理', () => {
-    const slots = placeOrphanVisualizations([viz('a', 0)], [1000, 2000])
-    expect([...slots.keys()]).toEqual([0])
-  })
-
-  test('Given 没有孤儿图表 When 定位 Then 空 Map（不渲染多余区块）', () => {
-    expect(placeOrphanVisualizations([], [1000, 2000]).size).toBe(0)
   })
 })

@@ -228,7 +228,12 @@ function PermissionCard({ item, handlers, busy, extra }: {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Enter' || event.shiftKey || busy) return
       const target = event.target as HTMLElement | null
-      if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)) return
+      // 焦点在按钮上时必须放行：Enter 是按钮的激活键，这里 preventDefault 会把
+      // 「拒绝」「本次会话总是允许」的默认动作吃掉，再按老逻辑当成「允许」发出去 ——
+      // 结果就是「想点拒绝却批了权限」。同类元素一并跳过，避免输入框里回车被吞。
+      if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT'
+        || target.tagName === 'BUTTON' || target.tagName === 'A'
+        || target.tagName === 'SELECT' || target.isContentEditable)) return
       event.preventDefault()
       handlers.onPermission(item.requestId, 'allow')
     }

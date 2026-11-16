@@ -10,6 +10,13 @@
  * 2. 不做分段动画与倒数自动收起。
  */
 import type { MessageGroup } from '@profer/session-core'
+import {
+  aggregateTaskItems,
+  isTaskProgressTool,
+  parseTaskToolInput,
+  type TaskItem,
+  type TaskToolActivity,
+} from './task-progress'
 
 export interface TimelineTool {
   id: string
@@ -21,6 +28,10 @@ export interface TimelineTool {
   done: boolean
   /** 投影里保留的文件路径，展开时能看到。 */
   filePath?: string
+  /** 完整入参（JSON，有界截断）：展开时按等宽正文查看。 */
+  inputText?: string
+  /** 工具输出（有界截断）：展开时按等宽正文查看。 */
+  output?: string
 }
 
 export type TimelineItem =
@@ -31,8 +42,10 @@ export type TimelineItem =
 export interface AssistantTimeline {
   /** 最终正文，留在过程组外直接可见；可能为空。 */
   headline: string
-  /** 过程组内的条目，保持原始顺序。 */
+  /** 过程组内的条目，保持原始顺序；任务工具已抽成 `tasks`，不在这里重复。 */
   items: TimelineItem[]
+  /** 本轮任务清单（TaskCreate/TaskUpdate/TodoWrite 聚合）；没有任务工具时为空。 */
+  tasks: TaskItem[]
   toolCount: number
   thinkingCount: number
   textCount: number
@@ -63,7 +76,7 @@ export function toolLabel(name: string): { category?: string; label: string } {
 }
 
 function emptyTimeline(): AssistantTimeline {
-  return { headline: '', items: [], toolCount: 0, thinkingCount: 0, textCount: 0, summary: '执行过程' }
+  return { headline: '', items: [], tasks: [], toolCount: 0, thinkingCount: 0, textCount: 0, summary: '执行过程' }
 }
 
 export function summarizeProcess(toolCount: number, thinkingCount: number, textCount: number): string {
@@ -148,12 +161,6 @@ export function isTurnSettled(
 }
 
 /**
- * 收集一轮里的过程条目。
- *
- * 两遍扫描：先收工具结果（决定 done / failed），再按原始顺序排块 ——
- * tool_result 与 tool_use 可能落在不同消息里，一遍扫会在结果到达前就渲染成「进行中」。
- */
-/**
  * 这一轮是否「还在飞」：只看**最后一个**工具调用是否还没拿到结果。
  *
  * 中途（被中断、结果永不落盘）缺失结果的工具不算 pending —— 真实会话里，还在飞的工具
@@ -182,15 +189,27 @@ export function turnHasTrailingPendingTool(group: MessageGroup | undefined): boo
   return lastToolId !== null && !resultIds.has(lastToolId)
 }
 
+export interface TimelineOptions {
+  /** 跨轮 TaskCreate 的 taskId → subject 映射（TaskUpdate 出现在后续轮时补任务名）。 */
+  historicalTaskSubjects?: ReadonlyMap<string, string>
+  /** 这一轮是否已收尾：结束后 in_progress 任务不再转圈。默认与 settled 同口径。 */
+  streamEnded?: boolean
+  /** 这一轮是否被用户手动打断：in_progress 任务标记为 cancelled。 */
+  stoppedByUser?: boolean
+}
+
 export function buildAssistantTimeline(
   group: MessageGroup | undefined,
   /** 这一轮是否已确定收尾。默认按顶层 result 判断；WebUI 拿不到 result，由调用方用
    * 「末尾工具已收齐」等更可靠的数据信号传入，否则严格分支会藏起缺结果的轮次正文。 */
   settled?: boolean,
+  options?: TimelineOptions,
 ): AssistantTimeline {
   if (!group || group.type !== 'assistant-turn') return emptyTimeline()
   const resultIds = new Set<string>()
   const failedIds = new Set<string>()
+  /** 结果正文（投影有界下发）：展开工具行时显示「输出」。 */
+  const resultOutputs = new Map<string, string>()
   for (const message of group.turnMessages) {
     const content = (message as { message?: { content?: unknown } }).message?.content
     if (!Array.isArray(content)) continue
@@ -199,10 +218,13 @@ export function buildAssistantTimeline(
       if (typeof block.tool_use_id !== 'string') continue
       resultIds.add(block.tool_use_id)
       if (block.is_error === true) failedIds.add(block.tool_use_id)
+      const output = block.output
+      if (typeof output === 'string' && output.trim()) resultOutputs.set(block.tool_use_id, output)
     }
   }
 
   const items: TimelineItem[] = []
+  const taskActivities: TaskToolActivity[] = []
   for (const message of group.turnMessages) {
     const record = message as { message?: { content?: unknown }; _partial?: unknown }
     const content = record.message?.content
@@ -223,6 +245,16 @@ export function buildAssistantTimeline(
       if (block.type !== 'tool_use' || typeof block.name !== 'string') continue
       const id = typeof block.id === 'string' ? block.id : `tool-${items.length}`
       const input = isRecord(block.input) ? block.input : {}
+      if (isTaskProgressTool(block.name)) {
+        // 任务工具聚合成卡片，不再作为普通工具行重复展示
+        taskActivities.push({
+          toolUseId: id,
+          toolName: block.name,
+          input: parseTaskToolInput(block.inputText, block.input, block.summary),
+          ...(resultOutputs.has(id) ? { result: resultOutputs.get(id) } : {}),
+        })
+        continue
+      }
       items.push({
         kind: 'tool',
         key: id,
@@ -233,6 +265,8 @@ export function buildAssistantTimeline(
           filePath: asString(input.file_path),
           done: resultIds.has(id),
           ...(failedIds.has(id) ? { failed: true } : {}),
+          ...(asString(block.inputText) ? { inputText: asString(block.inputText) } : {}),
+          ...(resultOutputs.has(id) ? { output: resultOutputs.get(id) } : {}),
         },
       })
     }
@@ -258,9 +292,19 @@ export function buildAssistantTimeline(
     else textCount += 1
   }
 
+  const tasks = taskActivities.length > 0
+    ? aggregateTaskItems(
+      taskActivities,
+      options?.streamEnded ?? (settled ?? isTurnFinished(group)),
+      options?.historicalTaskSubjects,
+      options?.stoppedByUser,
+    )
+    : []
+
   return {
     headline,
     items: processItems,
+    tasks,
     toolCount,
     thinkingCount,
     textCount,

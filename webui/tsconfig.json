@@ -20,6 +20,7 @@
     }
   },
   "include": [
+    "css-inline.d.ts",
     "main.tsx",
     "interactions.tsx",
     "turn-extras.tsx",

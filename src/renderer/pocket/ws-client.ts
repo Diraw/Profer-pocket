@@ -201,6 +201,22 @@ export interface WsClientOptions {
   onAgentResumeStatus?: (status: AgentResumeStatus) => void
 }
 
+/**
+ * 把 command_result 的失败转成 Error。
+ *
+ * 除了文案，还把服务端给的机器可读 `code` 挂到 error 上：调用方要按错误类型分支
+ * （例如「当前内核不支持追加消息」要提示停止本轮，而不是重试），匹配文案太脆。
+ */
+function commandFailure(msg: { conflict?: { code?: string }; error?: string; code?: string }): Error {
+  const text = msg.conflict?.code
+    ? `${msg.conflict.code}: ${msg.error || '指令失败'}`
+    : (msg.error || '指令失败')
+  const error = new Error(text) as Error & { code?: string }
+  const code = msg.conflict?.code ?? msg.code
+  if (code) error.code = code
+  return error
+}
+
 export class WsClient {
   private url: string
   private token: string
@@ -431,7 +447,7 @@ export class WsClient {
       this.pendingCommands.delete(id)
       this.completedCommands.add(id)
       if (msg.ok) pending.resolve(msg.data)
-      else pending.reject(new Error(msg.conflict?.code ? `${msg.conflict.code}: ${msg.error || '指令失败'}` : (msg.error || '指令失败')))
+      else pending.reject(commandFailure(msg))
       return
     }
     // 无 requestId 时用 FIFO 兜底（兼容）
@@ -441,7 +457,7 @@ export class WsClient {
       this.pendingCommands.delete(fid)
       this.completedCommands.add(fid)
       if (msg.ok) pending.resolve(msg.data)
-      else pending.reject(new Error(msg.conflict?.code ? `${msg.conflict.code}: ${msg.error || '指令失败'}` : (msg.error || '指令失败')))
+      else pending.reject(commandFailure(msg))
     }
   }
 
@@ -621,7 +637,7 @@ export class WsClient {
   }
 
   /** 快照回退（同一会话内回退到指定点，恢复文件 + 截断对话；对齐桌面 rewindSession） */
-  rewindSession(payload: { sessionId: string; assistantMessageUuid: string }): Promise<unknown> {
+  rewindSession(payload: { sessionId: string; assistantMessageUuid?: string }): Promise<unknown> {
     return this.sendCommand({ type: 'rewind_session', ...payload })
   }
 
@@ -846,6 +862,8 @@ export class WsClient {
      * 主进程按白名单取值，不参与任何鉴权判断。
      */
     clientKind?: 'webui' | 'remote'
+    /** 提及的技能 slug（正文里的 /skill:<slug> token 同步传一份，主进程做技能路由） */
+    mentionedSkills?: string[]
   }): Promise<unknown> {
     // 幂等去重键既要覆盖同一 WebView 的 WS 重连，也要覆盖“服务端已接收但 WebView
     // 被系统杀掉、未收到 accepted”的跨进程恢复窗口。
@@ -965,6 +983,8 @@ export class WsClient {
     mentionedSkills?: string[]
     mentionedMcpServers?: string[]
     mentionedSessionIds?: string[]
+    /** 来源客户端（展示用，仅 webui 白名单值） */
+    clientKind?: 'webui'
   }): Promise<unknown> {
     return this.sendCommand({ type: 'queue_message', ...payload })
   }

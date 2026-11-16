@@ -10,14 +10,19 @@
  */
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import type { SDKMessage } from '@profer/shared'
+import 'katex/dist/katex.min.css'
+import katexCss from 'katex/dist/katex.min.css?inline'
+import { MarkdownWithFiles } from './markdown-with-files'
+import { buildTurnFileIndex } from './file-reference'
+import { normalizeLatexDelimiters } from './normalize-latex'
+import type { AgentSessionMeta, SDKMessage } from '@profer/shared'
 import { groupIntoTurns, toTranscript, type MessageGroup } from '@profer/session-core'
 import { TurnAttachments, TurnImages, extractTurnExtras, stripContextBlocks, type ImageLoadResult } from './turn-extras'
 import { TurnProcess } from './turn-process'
+import { TaskProgressCard } from './task-progress-card'
+import { buildHistoricalTaskSubjects } from './task-progress'
 import { buildAssistantTimeline, isTurnFinished, isTurnSettled, turnHasTrailingPendingTool } from './turn-timeline'
-import { DiagOverlay, type DiagData, type DiagMessageSummary } from './diag'
+import { DiagOverlay } from './diag'
 import {
   SOURCE_LABELS,
   describeUsage,
@@ -41,27 +46,75 @@ import {
   type WebPreset,
 } from './preset-model'
 import { applyPageTitle } from './page-title'
-import { base64FromDataUrl, formatBytes, resolveSendText, validateAttachmentFile } from './attachments'
+import { isImageAttachment, resolveSendText } from './attachments'
 import { GoalBar, GoalEditor, GoalLauncher, type GoalAction } from './goal'
-import { normalizeGoal, normalizeGoalHistory, type GoalContract, type GoalLimits, type GoalState } from './goal-model'
-import { VisualizationList, normalizeVisualizations, placeOrphanVisualizations, type VisualizationItem } from './visualization'
+import { formatGoalBudget, goalStatusLabel, goalStatusText, normalizeGoal, normalizeGoalHistory, type GoalContract, type GoalLimits, type GoalState } from './goal-model'
+import { parseGoalCommand, type GoalCommand } from './goal-command'
+import { describeContextUsage, formatTokens, latestContextTokens, type ContextUsageInfo } from './context-usage'
+import { extractMentionedSkills, type FileOption, type SkillOption } from './mentions'
+import { normalizeVisualizations, type VisualizationItem } from './visualization'
 import { WsClient, defaultWsUrl } from '../src/renderer/pocket/ws-client'
 import {
-  InteractionCards,
-  decodeInteractions,
-  normalizeAskUserItems,
-  normalizeExitPlanItems,
-  normalizeGoalProposals,
-  normalizePermissionItems,
-  normalizePermissionMode,
-  type AskUserItem,
-  type SendPermissionMode,
-  type ExitPlanAction,
-  type ExitPlanItem,
-  type GoalProposalItem,
-  type InteractionHandlers,
-  type PermissionItem,
-} from './interactions'
+  type AgentEventPayload,
+  type DataUrlEnvelope,
+  type GoalEnvelope,
+  type GoalHistoryEnvelope,
+  type PiReasoningCapabilityEnvelope,
+  type SessionDetailEnvelope,
+  type SessionMetaPayload,
+  type VisualizationEnvelope,
+} from './protocol'
+import { useAutoScroll } from './use-auto-scroll'
+import { useDiagnostics } from './use-diagnostics'
+import { useAttachments } from './use-attachments'
+import { useInteractions } from './use-interactions'
+import { WEBUI_BUILD } from './build-info'
+import { Topbar } from './topbar'
+import { SessionInfo } from './session-info'
+import { MessageHistory } from './message-history'
+import { buildHistoryEntries } from './history-list'
+import { fileNameOf, type BinaryLoadResult, type TextPreviewResult } from './file-preview'
+import { openStandalonePreview, type StandalonePreviewContent } from './standalone-preview'
+import { renderMarkdownToStaticHtml } from './markdown-static'
+import { TurnActions } from './turn-actions'
+import { StopAndSend } from './stop-and-send'
+import { ConfirmSheet } from './confirm-sheet'
+import { RewindPlanSheet } from './rewind-plan-sheet'
+import { RunStatus } from './run-status'
+import { collectPendingBackgroundTasks } from './background-tasks'
+import {
+  applyDelegationBlocked,
+  applyDelegationSessionUpdate,
+  normalizeBlockedEvent,
+  normalizeDelegations,
+  resolveDelegationBlocked,
+  type DelegationsView,
+} from './delegations'
+import {
+  deriveRunOutcomeFromHistory,
+  normalizePersistenceEvent,
+  normalizeRetryEvent,
+  normalizeRunOutcomeEvent,
+  runOutcomeTone,
+  type PersistenceWarning,
+  type RetryInfo,
+  type RunOutcomeInfo,
+} from './run-outcome'
+import { findTurnIndexForMessage, normalizeSessionSearchMatches, type SessionSearchMatch } from './session-search'
+import type {
+  DelegationSnapshotEnvelope,
+  RewindExecuteEnvelope,
+  RewindPlanFilePayload,
+  RewindPrepareEnvelope,
+  RewindPlanPayload,
+  SessionSearchEnvelope,
+} from './protocol'
+import { copyText } from './clipboard'
+import { findPreviousAssistantUuid, resolveRetryTurn } from './retry-turn'
+import { isQueueUnsupportedError, isRunActiveError } from './run-state'
+import { requestNotifyPermission, useCompletionNotify } from './use-completion-notify'
+import { Composer } from './composer'
+import { InteractionCards, normalizePermissionMode, type SendPermissionMode } from './interactions'
 import './styles.css'
 
 interface WebuiBoot {
@@ -86,6 +139,11 @@ interface SessionMeta {
   /** 会话所属工作区 slug —— 预设是工作区级配置，所有预设命令都要带它 */
   workspaceSlug?: string
   revision?: number
+  /** 最近一次非正常结束（主进程落盘）：刷新后用它恢复结局行 */
+  lastInterruptReason?: string
+  lastInterruptLabel?: string
+  lastInterruptAt?: number
+  stoppedByUser?: boolean
 }
 
 /**
@@ -104,28 +162,11 @@ interface RemoteChannel {
   models?: unknown[]
 }
 
-/**
- * 待发送附件。
- *
- * `filename` 用**服务端返回的名字**：同名文件会被加序号（a.png → a-1.png），
- * 拿本地原名回填会在发送时解析不到。失败项留在列表里而不是弹走 ——
- * 用户需要看到是哪个文件、为什么被拒。
- */
-interface StagedAttachment {
-  key: string
-  filename: string
-  size: number
-  status: 'uploading' | 'ready' | 'error'
-  error?: string
-}
-
 declare global {
   interface Window { __PROFER_WEBUI_BOOT__?: WebuiBoot }
 }
 
-/** 由 vite define 在构建时注入，用于判断浏览器跑的是不是最新产物。 */
-declare const __WEBUI_BUILD__: string
-console.info('[profer-webui] build', __WEBUI_BUILD__)
+console.info('[profer-webui] build', WEBUI_BUILD)
 
 /**
  * iOS Safari / 部分安卓 Chrome 的前进后退缓存（bfcache）会**连 JS 堆与 WebSocket
@@ -148,13 +189,8 @@ if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'm
 /** 空态快捷入口：只填进输入框，不直接发出去，避免误触消耗一轮。 */
 const QUICK_PROMPTS = ['总结一下当前进度', '接下来该做什么', '解释一下刚才的改动']
 
-/**
- * 触屏设备上没有 Shift 键：若 Enter 仍当发送，就永远没办法在消息里换行。
- * 按指针类型分流 —— 粗指针（手机/平板）Enter 换行、统一用圆键发送；
- * 细指针（桌面浏览器）保持 Enter 发送的老习惯。
- */
-const PREFER_SEND_BUTTON = typeof window.matchMedia === 'function'
-  && window.matchMedia('(pointer: coarse)').matches
+/** 搜索定位时一次取回的消息窗口：覆盖「行号与消息下标略有漂移」的换算误差。 */
+const SEARCH_JUMP_WINDOW = 80
 
 /**
  * 三态权限模式，与桌面端那个下拉是同一套东西（auto=自动审批 / bypassPermissions=完全自动 / plan=计划模式）。
@@ -224,18 +260,14 @@ function isPresetReference(value: unknown): value is PresetReference {
     && (value as { presetId: string }).presetId.length > 0
 }
 
-function upsertById<T extends { requestId: string }>(list: T[], item: T): T[] {
-  const index = list.findIndex((entry) => entry.requestId === item.requestId)
-  if (index >= 0) {
-    const next = list.slice()
-    next[index] = item
-    return next
-  }
-  return [...list, item]
-}
-
 function App(): React.ReactElement {
   const [messages, setMessages] = React.useState<SDKMessage[]>([])
+  /**
+   * 首屏消息是否已从服务端拉取完成。
+   * 刷新时 WS 先连上、事件回放也可能先到，但 get_sdk_messages 还在路上；
+   * 这段时间不能渲染空态（会闪一下「开始对话」+ 快捷提问）和回放带出的结局行。
+   */
+  const [historyLoaded, setHistoryLoaded] = React.useState(false)
   const [connection, setConnection] = React.useState('连接中…')
   const [connected, setConnected] = React.useState(false)
   const [meta, setMeta] = React.useState<SessionMeta | null>(null)
@@ -244,41 +276,89 @@ function App(): React.ReactElement {
   const runningRef = React.useRef(running)
   runningRef.current = running
   const messagesRef = React.useRef<SDKMessage[]>([])
-  /** WS 重连次数（含首次连接）：诊断「电脑复现 iPhone 不复现」用。 */
-  const reconnectCountRef = React.useRef(0)
-  /** 诊断事件环形缓冲：记录 reload/重连/正文变化等关键时序，复制一次带上事发经过。 */
-  const diagEventsRef = React.useRef<string[]>([])
-  const diagEvent = (line: string): void => {
-    const now = new Date()
-    const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
-    const list = diagEventsRef.current
-    list.push(`${clock} ${line}`)
-    if (list.length > 40) list.shift()
-  }
-  /** 页面加载的 bundle 与服务端当前 bundle 是否一致（不一致=旧包，硬刷新即可）。 */
-  const [staleBundle, setStaleBundle] = React.useState(false)
-  const lastHeadlineLenRef = React.useRef(0)
   const [input, setInput] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   /** 压缩 run 飞行中：按钮自身显示「压缩中…」，run 结束自动恢复 —— 不用 notice（没人清会残留）。 */
   const [compacting, setCompacting] = React.useState(false)
   /** 目标表单展开：入口在顶栏左上角（三段式导航），表单仍在消息流顶部 */
   const [goalOpen, setGoalOpen] = React.useState(false)
+  /** 会话信息条：点标题胶囊（除模型行与历史按钮）显示 */
+  const [infoOpen, setInfoOpen] = React.useState(false)
+  /** 历史对话面板：本会话已加载回合的跳转表 */
+  const [historyOpen, setHistoryOpen] = React.useState(false)
+  /** 用户消息操作面板：目标回合下标 */
+  const [actionsTurn, setActionsTurn] = React.useState<number | null>(null)
+  /**
+   * 服务端权威运行态。
+   *
+   * `running` / `sessionActive` 都是从事件流推断的，刷新、重连、断帧之后必然落后；
+   * 落后时会对正在跑的会话发 `send_message`，被 claim 拒绝并弹红字。
+   * 这个值来自 `session_detail.active`，发送路径以它为准。
+   */
+  const [serverActive, setServerActive] = React.useState(false)
+  /** 「当前内核不支持追加」时要发送的文本：确认停止本轮后立即发出 */
+  const [stopSendText, setStopSendText] = React.useState<string | null>(null)
+  /** 压缩上下文前的确认：压缩会占一整轮，误点代价不小 */
+  const [compactConfirmOpen, setCompactConfirmOpen] = React.useState(false)
+  /** 编辑重发：是否同时还原文件改动（rewind both） */
+  const [restoreFiles, setRestoreFiles] = React.useState(true)
+  /** 两段式回退：prepare 出的计划等用户确认后执行 */
+  const [rewindPlan, setRewindPlan] = React.useState<{
+    planId: string
+    revision: { session: number; files: number; state: number }
+    files: RewindPlanFilePayload[]
+    text: string
+  } | null>(null)
+  /** `/goal <新目标>` 撞上未完成目标时的替换确认 */
+  const [pendingGoalStart, setPendingGoalStart] = React.useState<{ goal: string; contract?: GoalContract } | null>(null)
+  /**
+   * 上下文窗口大小（tokens）：context_window 事件 / 运行态快照下发。
+   *
+   * 主进程在 run_idle 后会清掉运行态快照（避免向历史会话注入旧窗口），所以
+   * 「重新打开一个空闲会话」时快照里没有它 —— 这里用 localStorage 记住最后一次
+   * 已知的窗口大小，占用条才不会在刷新后消失。窗口大小由模型决定，基本稳定；
+   * 换模型后下一个 context_window 事件会纠正。
+   */
+  const [contextWindow, setContextWindowState] = React.useState<number | null>(null)
+  const contextWindowKey = `profer-webui-ctx-window:${sessionId}`
+  React.useEffect(() => {
+    try {
+      const saved = Number(window.localStorage.getItem(contextWindowKey))
+      if (Number.isFinite(saved) && saved > 0) setContextWindowState(saved)
+    } catch { /* localStorage 不可用时忽略 */ }
+  }, [contextWindowKey])
+  const setContextWindow = React.useCallback((value: number): void => {
+    setContextWindowState(value)
+    try { window.localStorage.setItem(contextWindowKey, String(value)) } catch { /* ignore */ }
+  }, [contextWindowKey])
+  /** 当前会话可用的技能（/ 提及候选）：list_skills 下发 */
+  const [skillOptions, setSkillOptions] = React.useState<SkillOption[]>([])
+  /** 当前会话可引用的文件（@ 提及候选）：list_workspace_files 下发 */
+  const [fileOptions, setFileOptions] = React.useState<FileOption[]>([])
+  /**
+   * 技能加载结果：'ok'（N 个）/ 'empty'（主进程返回空 = 工作区没有启用技能）/
+   * 'unsupported'（主进程没有 list_skills = 旧主进程，需要重启）/ 'error'。
+   * 放进信息条展示，避免「@ 没反应」变成无头案。
+   */
+  const [skillStatus, setSkillStatus] = React.useState<'idle' | 'ok' | 'empty' | 'unsupported' | 'error'>('idle')
+  /** 服务端带回的扫描失败原因（单个技能目录损坏等），显示在信息条里 */
+  const [skillWarning, setSkillWarning] = React.useState<string | null>(null)
   const [acting, setActing] = React.useState(false)
   const [notice, setNotice] = React.useState('')
-  const [permissions, setPermissions] = React.useState<PermissionItem[]>([])
-  const [askUsers, setAskUsers] = React.useState<AskUserItem[]>([])
-  const [exitPlans, setExitPlans] = React.useState<ExitPlanItem[]>([])
-  const [goalProposals, setGoalProposals] = React.useState<GoalProposalItem[]>([])
   const [goal, setGoal] = React.useState<GoalState | null>(null)
   /** 归档 Goal：清除/完成后的历史，只在展开时才有内容可看，但仍然随清除动作刷新 */
   const [goalHistory, setGoalHistory] = React.useState<GoalState[]>([])
   const [goalEditorOpen, setGoalEditorOpen] = React.useState(false)
   const [visualizations, setVisualizations] = React.useState<VisualizationItem[]>([])
-  const [attachments, setAttachments] = React.useState<StagedAttachment[]>([])
   const [switchingMode, setSwitchingMode] = React.useState(false)
   /** 模型 + 强度菜单；数据来自 list_channels（模型表）与 session_detail（当前选择） */
   const [settingsMenuOpen, setSettingsMenuOpen] = React.useState(false)
+  /** 由顶栏上下文百分比触发：打开菜单后直接定位到压缩项 */
+  const [focusCompact, setFocusCompact] = React.useState(false)
+  // 菜单一关闭就清掉定位标志：下次从标题普通打开不该还跳到压缩项
+  React.useEffect(() => {
+    if (!settingsMenuOpen && focusCompact) setFocusCompact(false)
+  }, [settingsMenuOpen, focusCompact])
   /** 预设（岗位）：列表、默认值、管理面板。作用域由会话的 workspaceSlug 决定 */
   const [presets, setPresets] = React.useState<WebPreset[]>([])
   const [presetsLoaded, setPresetsLoaded] = React.useState(false)
@@ -289,30 +369,27 @@ function App(): React.ReactElement {
   const [reasoningLevels, setReasoningLevels] = React.useState<string[] | null>(null)
   const [switchingModel, setSwitchingModel] = React.useState(false)
   const clientRef = React.useRef<WsClient | null>(null)
-  const scrollRef = React.useRef<HTMLDivElement | null>(null)
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null)
-  const fileInputRef = React.useRef<HTMLInputElement | null>(null)
-  /** 上传回调里要读当前列表（闭包拿不到最新 state），与 heldRef 同一手法。 */
-  const attachmentsRef = React.useRef<StagedAttachment[]>([])
   const lastCompletedRef = React.useRef(0)
-  /** 是否贴着底部。用户上滑阅读时不跟随新内容，只露出「回到最新」。 */
-  const atBottomRef = React.useRef(true)
-  /** 上次已知的 scrollTop：区分「用户滚动」与「布局撑高引发的 scroll 事件」。 */
-  const lastScrollTopRef = React.useRef(0)
-  /**
-   * 首屏「自动贴底模式」：刷新后直到用户首次滚动输入之前，任何布局变化
-   * （图片/图表加载撑高、GoalBar 等顶部区块迟到插入）都不许把视口拽走。
-   * 用户一滚（滚轮/触摸/键盘）立即交还控制，恢复正常贴底语义。
-   */
-  const userEngagedRef = React.useRef(false)
-  const [jumpVisible, setJumpVisible] = React.useState(false)
   const [pageStart, setPageStart] = React.useState(0)
   const [hasOlder, setHasOlder] = React.useState(false)
   const [loadingOlder, setLoadingOlder] = React.useState(false)
   /** reload 要按「当前持有多少条」决定取多少尾部，但不能因此把 messages 放进依赖。 */
   const heldRef = React.useRef(0)
-  /** 前置拼接前记录「距底部距离」，插入后按它还原，否则视口会跳一下。 */
-  const prependAnchorRef = React.useRef<number | null>(null)
+  /** 本轮运行结局：只由 run_completed 写入，新消息发出时清空 */
+  const [runOutcome, setRunOutcome] = React.useState<RunOutcomeInfo | null>(null)
+  /** 正在重试（第 n/m 次）；终态或 cleared 时收起 */
+  const [retryInfo, setRetryInfo] = React.useState<RetryInfo | null>(null)
+  /** 本轮记录落盘失败的告警（saved / pending 时自动清） */
+  const [persistenceWarning, setPersistenceWarning] = React.useState<PersistenceWarning | null>(null)
+  /** run_completed.backgroundTasksPending：计数未知时的兜底（真正的任务表从消息里推） */
+  const [backgroundPending, setBackgroundPending] = React.useState(false)
+  /** 运行中的委派子任务（快照 + 阻塞事件共同维护） */
+  const [delegations, setDelegations] = React.useState<DelegationsView>({ running: [], blockedCount: 0 })
+  /** 全量搜索仍在定位（服务端行号与消息下标的换算要翻页） */
+  const [searchJumping, setSearchJumping] = React.useState(false)
+  /** 定位完成后等 DOM 提交再滚：分组下标只对新 messages 有效 */
+  const [pendingJumpIndex, setPendingJumpIndex] = React.useState<number | null>(null)
 
   // session-core 的纯函数负责快照去重与 turn 分组，避免自己重抄一套口径。
   const groups = React.useMemo(() => groupIntoTurns(messages), [messages])
@@ -337,16 +414,31 @@ function App(): React.ReactElement {
       pending: group?.type === 'assistant-turn' ? turnHasTrailingPendingTool(group) : false,
     }
   }, [groups])
+  /** TaskUpdate 可能出现在 TaskCreate 之后的另一轮：任务名映射按全量消息算一次。 */
+  const historicalTaskSubjects = React.useMemo(
+    () => buildHistoricalTaskSubjects(messages),
+    [messages],
+  )
   /** 过程时间线：把每轮拆成「最终正文 + 交织的叙述/工具/思考」。
    * 非末尾回合一律当已收尾（宽松）；末尾回合在「末尾工具还在飞」时才走严格分支，
    * 否则也宽松 —— 这样缺结果/被中断的轮次正文不会被藏起来，手机重连把 running 顶成
    * true 也不影响（settled 不依赖 running）。 */
   const timelines = React.useMemo(
-    () => groups.map((group, i) => buildAssistantTimeline(
-      group,
-      i !== lastNonSystem.index ? true : !lastNonSystem.pending,
-    )),
-    [groups, lastNonSystem],
+    () => groups.map((group, i) => {
+      const isLast = i === lastNonSystem.index
+      return buildAssistantTimeline(
+        group,
+        isLast ? !lastNonSystem.pending : true,
+        {
+          historicalTaskSubjects,
+          // 任务卡上的「进行中」动画跟着轮次是否收尾走：历史轮一律不转圈，
+          // 末尾轮以 result / running 为准（与过程组的 live 判据同源）。
+          streamEnded: !isLast || !running || isTurnFinished(group),
+          stoppedByUser: isLast && runOutcome?.kind === 'stopped',
+        },
+      )
+    }),
+    [groups, lastNonSystem, historicalTaskSubjects, running, runOutcome],
   )
   /**
    * 「这一轮还有事在跑」。running 只是传输层的猜测，两个方向都会错：
@@ -371,67 +463,6 @@ function App(): React.ReactElement {
     return false
   }, [groups, timelines])
   const sessionActive = running && !lastTurnFinished
-  /**
-   * 诊断数据（`?diag=1` 时右下角浮层展示）。
-   *
-   * 排查「实时流里 headline 消失、刷新后出现」这类问题：刷新拉取的数据是干净的，
-   * 坏的是实时累积态，必须把消息序列与推导结果原样打出来对比 —— 尤其是最后一轮
-   * 的 items（哪个块把 headline 挡了）与最近几条消息的 uuid/partial（残条来源）。
-   */
-  const diagData = React.useMemo<DiagData>(() => {
-    const summary = (message: SDKMessage): DiagMessageSummary => {
-      const content = (message as { message?: { content?: unknown } }).message?.content
-      const blocks = Array.isArray(content)
-        ? content.flatMap((block): string[] =>
-          block && typeof block === 'object' && typeof (block as { type?: unknown }).type === 'string'
-            ? [(block as { type: string }).type]
-            : [])
-        : []
-      return {
-        t: String(message.type ?? ''),
-        u: String((message as { uuid?: string }).uuid ?? '').slice(0, 8),
-        p: (message as { _partial?: boolean })._partial === true,
-        r: (message as { isReplay?: boolean }).isReplay === true,
-        b: blocks,
-      }
-    }
-    const lastGroup = lastNonSystem.index >= 0 ? groups[lastNonSystem.index] : undefined
-    const lastTimeline = lastNonSystem.index >= 0 ? timelines[lastNonSystem.index] : undefined
-    // headline 非空→空 的翻转是「正文消失」的现场信号，记录进事件历史
-    const headlineLen = lastNonSystem.index >= 0 ? (timelines[lastNonSystem.index]?.headline.length ?? 0) : 0
-    const previousHeadline = lastHeadlineLenRef.current
-    lastHeadlineLenRef.current = headlineLen
-    if (previousHeadline > 0 && headlineLen === 0) {
-      diagEvent(`headline ${previousHeadline} → 0（正文消失）`)
-    } else if (previousHeadline === 0 && headlineLen > 0) {
-      diagEvent(`headline 0 → ${headlineLen}（正文出现）`)
-    }
-    return {
-      build: __WEBUI_BUILD__,
-      stale: staleBundle,
-      events: diagEventsRef.current.slice(-25),
-      reconnects: reconnectCountRef.current,
-      connected,
-      running,
-      sessionActive,
-      lastTurnFinished,
-      lastNonSystem: { index: lastNonSystem.index, pending: lastNonSystem.pending },
-      messages: messages.slice(-14).map(summary),
-      lastTurn: lastGroup?.type === 'assistant-turn' && lastTimeline
-        ? {
-          headlineLen: lastTimeline.headline.length,
-          headline: lastTimeline.headline.slice(0, 90),
-          items: lastTimeline.items.map((item) => item.kind === 'tool'
-            ? `tool:${item.tool.done ? 'done' : 'PEND'}:${item.tool.name}`
-            : item.kind),
-          pendingTools: lastTimeline.items.filter((item) => item.kind === 'tool' && !item.tool.done).length,
-          trailingPending: turnHasTrailingPendingTool(lastGroup),
-          finished: isTurnFinished(lastGroup),
-          settled: isTurnSettled(lastGroup, lastTimeline),
-        }
-        : null,
-    }
-  }, [messages, groups, timelines, lastNonSystem, running, sessionActive, lastTurnFinished, connected, reconnectCountRef, staleBundle])
   /** 内核决定用哪套推理档位；缺省按 claude 处理（历史会话与旧服务端都是这个默认） */
   const agentRuntime = meta?.agentRuntime ?? 'claude'
   /** 当前内核可切的模型（过滤规则与服务端 update_session_model 同一份） */
@@ -475,9 +506,46 @@ function App(): React.ReactElement {
       usageDetail: usage ? describeUsageDetail(usage) : '',
     }
   }), [groups, models])
-  const hasPending = permissions.length + askUsers.length + exitPlans.length > 0
-  /** 提议不阻塞运行，所以只影响「是否渲染卡片区」，不锁输入框。 */
-  const hasCards = hasPending || goalProposals.length > 0
+
+  /**
+   * 历史对话列表：只取**已加载**的回合。
+   *
+   * 更早的消息还没取回来（首屏只拉尾部 60 条），列出来也跳不过去；面板底部给
+   * 「加载更早的消息」，取回后列表自然变长。想一次列全需要新的分页索引命令，
+   * 收益不值这个复杂度。
+   */
+  const historyEntries = React.useMemo(() => buildHistoryEntries({
+    turns,
+    headlines: timelines.map((timeline) => timeline.headline),
+    summaries: timelines.map((timeline) => timeline.summary),
+    clocks: turnMetas.map((meta) => meta.clock),
+  }), [turns, timelines, turnMetas])
+
+  /** 完成提醒的正文：最后一轮助手回合的正文/过程摘要 */
+  const lastAssistantPreview = React.useMemo(() => {
+    for (let index = timelines.length - 1; index >= 0; index--) {
+      const timeline = timelines[index]
+      if (!timeline) continue
+      const line = (timeline.headline || timeline.summary || '').replace(/\s+/g, ' ').trim()
+      if (line) return line.slice(0, 80)
+    }
+    return ''
+  }, [timelines])
+
+  /**
+   * 已用 tokens：最后一轮顶层 assistant 消息的输入侧用量（口径同桌面 ContextUsageBadge：
+   * 未缓存输入 + 缓存读取 + 缓存写入）。子代理消息属于另一份上下文，跳过。
+   */
+  const contextUsed = React.useMemo(() => latestContextTokens(messages), [messages])
+
+  const contextUsage = React.useMemo<ContextUsageInfo>(
+    () => describeContextUsage(contextUsed, contextWindow),
+    [contextUsed, contextWindow],
+  )
+
+  // 页面在后台时跑完一轮 → 系统通知（拿不到权限就退化成标题打点）
+  useCompletionNotify({ active: sessionActive, title: meta?.title ?? '', preview: lastAssistantPreview })
+
   const permissionMode = meta?.permissionMode ?? 'bypassPermissions'
   /** 图表挂在工具调用行上，靠 toolCallId 关联（消息体里没有图表数据）。 */
   const vizByTool = React.useMemo(() => {
@@ -485,30 +553,24 @@ function App(): React.ReactElement {
     for (const item of visualizations) map.set(item.toolCallId, item)
     return map
   }, [visualizations])
+
   /**
-   * 没有任何已加载回合引用到的图表。分页只取尾部，较早回合的工具行可能不在窗口里；
-   * 这时若直接丢弃，图表会凭空消失 —— 所以保留，但必须按时间插回它该在的位置。
-   *
-   * 旧实现统一追加到消息流末尾：一张很早的图会出现在所有对话之后，
-   * 看起来像「图表自己跑到了最下面」。
+   * 后台任务只看消息窗口：任务开始/进度/通知都落在系统消息里，刷新后重算即可。
+   * `backgroundPending` 只补「窗口里没有 task_started」的计数未知情形。
    */
-  const orphanVisualizations = React.useMemo(() => {
-    const matched = new Set<string>()
-    for (const timeline of timelines) {
-      for (const item of timeline.items) {
-        if (item.kind === 'tool') matched.add(item.tool.id)
-      }
-    }
-    return visualizations.filter((item) => !matched.has(item.toolCallId))
-  }, [timelines, visualizations])
-  /** 插入位置 → 该位置要显示的孤儿图表；键为 turns.length 表示确实属于最新之后 */
-  const vizSlots = React.useMemo(
-    () => placeOrphanVisualizations(
-      orphanVisualizations,
-      turns.map((turn) => turnMetas[turn.index]?.at),
-    ),
-    [orphanVisualizations, turns, turnMetas],
+  const backgroundTasks = React.useMemo(
+    () => collectPendingBackgroundTasks(messages, backgroundPending),
+    [messages, backgroundPending],
   )
+  /**
+   * 刷新后的结局兜底。事件给的结局优先；这里只在没有事件结局时补，
+   * 并自带「晚于最后一条用户输入」的时效判据，避免把上一轮的中断挂在本轮末尾。
+   */
+  const historyOutcome = React.useMemo(
+    () => (sessionActive ? null : deriveRunOutcomeFromHistory(messages, meta)),
+    [messages, meta, sessionActive],
+  )
+  const effectiveOutcome = runOutcome ?? historyOutcome
 
   // 标签页名字就是会话名：同时开多个会话页时，光看标签就能认出哪个是哪个。
   // 首屏标题已由服务端按会话名注入，所以会话信息没到之前什么都不做 —— 否则会先冲回兜底文案。
@@ -517,135 +579,134 @@ function App(): React.ReactElement {
     applyPageTitle(meta.title)
   }, [meta])
 
-  // 键盘滚动（空格/方向键/PgUp/PgDn/Home/End）也算用户接管
-  React.useEffect(() => {
-    const scrollKeys = new Set([' ', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (scrollKeys.has(event.key)) userEngagedRef.current = true
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [])
+  /**
+   * 诊断层 / 滚动层 / 附件层各自独立成 hook：
+   * 这三块都有「必须在 effect 里跑」的副作用（写 ref、触发 reload、上传竞态），
+   * 挤在页面组件里最容易顺手塞进渲染路径，也最难单独验证。
+   */
+  const { diagEvent, noteReconnect, diagData, staleBundle } = useDiagnostics({
+    messages, groups, timelines, lastNonSystem, running, sessionActive, lastTurnFinished, connected,
+  })
+  const {
+    scrollRef,
+    atBottomRef,
+    prependAnchorRef,
+    jumpVisible,
+    scrollToLatest,
+    handleStreamScroll,
+    handleUserEngage,
+    capturePrependAnchor,
+    markReadingHistory,
+  } = useAutoScroll(messages.length, diagEvent)
+  const {
+    attachments,
+    fileInputRef,
+    ready: readyAttachments,
+    uploading: uploadingAttachments,
+    pickFiles,
+    removeAttachment,
+    clearAttachments,
+  } = useAttachments({ clientRef, sessionId, connected, onNotice: setNotice })
 
+  /**
+   * 跳到某个回合。
+   *
+   * 必须先交出滚动控制权：rAF 贴底循环在「内容变高」的那一帧会把人拽回底部，
+   * 而图片/图表加载正好发生在滚动之后 —— 不标记就会被立刻拉走（表现为「点了没反应」）。
+   */
+  const jumpToTurn = React.useCallback((turnIndex: number): void => {
+    setHistoryOpen(false)
+    const node = scrollRef.current?.querySelector<HTMLElement>(`[data-turn-index="${turnIndex}"]`)
+    if (!node) return
+    handleUserEngage()
+    markReadingHistory()
+    node.scrollIntoView({ block: 'start', behavior: 'auto' })
+  }, [handleUserEngage, markReadingHistory])
+
+  /** 搜索命中要先换掉消息窗口，回合才存在；等这次提交渲染完再滚。 */
+  React.useEffect(() => {
+    if (pendingJumpIndex === null) return
+    const node = scrollRef.current?.querySelector<HTMLElement>(`[data-turn-index="${pendingJumpIndex}"]`)
+    if (!node) return
+    handleUserEngage()
+    markReadingHistory()
+    node.scrollIntoView({ block: 'start', behavior: 'auto' })
+    setPendingJumpIndex(null)
+  }, [pendingJumpIndex, messages, handleUserEngage, markReadingHistory, scrollRef])
+
+  /**
+   * 跳到全量搜索的一条命中。
+   *
+   * 服务端给的是 JSONL 行号，`get_sdk_messages` 的 `before` 是解析后的消息下标；
+   * 两者在有「被丢弃的传输错误消息」时会漂移。所以按窗口取回并校验命中是否真的
+   * 落在里面，没落在就沿 `startIndex` 往前回溯（有上限，避免一次点击翻完整本会话）。
+   * 运行中不允许跳：流式正文还在变，贴底与滚动会互相抢。
+   */
+  const jumpToSearchMatch = React.useCallback(async (match: SessionSearchMatch): Promise<void> => {
+    if (sessionActive) {
+      setNotice('本轮还在运行，等结束后再跳到旧位置')
+      return
+    }
+    const client = clientRef.current
+    if (!client) {
+      setNotice('连接已断开，请刷新后重试')
+      return
+    }
+    setSearchJumping(true)
+    try {
+      let current = messagesRef.current
+      let before = match.lineIndex + 1
+      let nextPageStart = pageStart
+      let nextHasOlder = hasOlder
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const page = decodeMessagePage(await client.getSdkMessages(sessionId, {
+          before,
+          targetMessages: SEARCH_JUMP_WINDOW,
+        }))
+        if (page.messages.length === 0) break
+        current = mergePrepend(page.messages, current)
+        nextPageStart = Math.min(nextPageStart, page.startIndex)
+        nextHasOlder = nextPageStart > 0 ? (nextHasOlder || page.hasMore) : false
+        const turnIndex = findTurnIndexForMessage(groupIntoTurns(current), match.messageId)
+        if (turnIndex !== undefined) {
+          setMessages(current)
+          setPageStart(nextPageStart)
+          setHasOlder(nextHasOlder)
+          setHistoryOpen(false)
+          setPendingJumpIndex(turnIndex)
+          return
+        }
+        if (page.startIndex >= before) break
+        before = page.startIndex
+      }
+      // 没定位到也把取回来的历史留下：用户至少能继续往上翻着找
+      setMessages(current)
+      setPageStart(nextPageStart)
+      setHasOlder(nextHasOlder)
+      setNotice('没能在已落盘的记录里定位到这条消息，可能它还在本轮内存中')
+    } catch (error) {
+      setNotice(`搜索定位失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setSearchJumping(false)
+    }
+  }, [sessionActive, sessionId, pageStart, hasOlder])
+
+  /** 全量搜索：只读命令，服务端按会话授权校验。失败要让面板显示错误而不是空结果。 */
+  const remoteSearch = React.useCallback(async (text: string): Promise<SessionSearchMatch[]> => {
+    const client = clientRef.current
+    if (!client) throw new Error('连接已断开，请刷新后重试')
+    const raw = await client.sendCommand<SessionSearchEnvelope>({
+      type: 'search_session_messages',
+      sessionId,
+      query: text,
+      limit: 60,
+    })
+    return normalizeSessionSearchMatches(raw?.matches)
+  }, [sessionId])
 
   // 让 reload 读到「当前持有条数」，同时避免把它塞进回调依赖 —— 否则每条消息都会重建连接 effect。
   React.useEffect(() => { heldRef.current = messages.length }, [messages])
-  React.useEffect(() => { attachmentsRef.current = attachments }, [attachments])
 
-  /** 前置拼接后按距底距离还原滚动位置，否则视口会跳掉一大截。 */
-  React.useLayoutEffect(() => {
-    const anchor = prependAnchorRef.current
-    if (anchor === null) return
-    prependAnchorRef.current = null
-    const node = scrollRef.current
-    if (node) {
-      node.scrollTop = node.scrollHeight - anchor
-      lastScrollTopRef.current = node.scrollTop
-    }
-  }, [messages])
-
-  /**
-   * 贴底才跟随。用户上滑读历史时不能被新内容拽回底部，只露出一颗「回到最新」。
-   * 平滑滚动只给按钮用：流式输出时每帧重置 smooth 动画会明显拖影。
-   */
-  const scrollToLatest = React.useCallback((smooth: boolean): void => {
-    const node = scrollRef.current
-    if (!node) return
-    node.scrollTo({ top: node.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
-    lastScrollTopRef.current = node.scrollTop
-    atBottomRef.current = true
-    setJumpVisible(false)
-  }, [])
-
-  /**
-   * 贴底跟随：每帧检查，内容变高的**当帧**就把 scrollTop 顶到底。
-   *
-   * 两个关键语义（都由真实 bug 反推）：
-   * 1. 只在 scrollHeight **增长**时贴底 —— 不能见 gap>0 就贴，否则用户小幅
-   *    上滑的 gap 会被抢先归零、贴底状态永远为真，人就被钉在底部
-   *    （「刷新后想看历史却被钉住」）。用户滚动造成的 gap 一律不动。
-   * 2. 同帧修正（rAF 在 paint 之前执行），不产生可见中间态 —— 定时追赶
-   *    （每 350ms 跳一次底部）会在撑高期反复闪烁（iPhone 实测）。
-   *
-   * 首屏自动贴底模式（userEngaged=false）下内容增高即贴；用户首次滚动后
-   * 交还控制，只在「贴底状态且内容增高」时跟随。
-   */
-  React.useEffect(() => {
-    let raf = 0
-    let lastHeight = 0
-    const tick = (): void => {
-      const node = scrollRef.current
-      if (node) {
-        const height = node.scrollHeight
-        if (height > lastHeight && (atBottomRef.current || !userEngagedRef.current)) {
-          node.scrollTop = height
-          lastScrollTopRef.current = node.scrollTop
-        }
-        lastHeight = height
-      }
-      raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [])
-
-  const handleStreamScroll = (): void => {
-    const node = scrollRef.current
-    if (!node) return
-    // scrollTop 未变的 scroll 事件是「布局撑高」（图片/卡片异步加载）引发的，
-    // 不是用户滚动。iOS Safari 会触发这类事件 —— 不许据此改 atBottomRef，
-    // 否则贴底跟随被误停，上方继续增高时视口就悬在「上面」。
-    if (node.scrollTop === lastScrollTopRef.current) return
-    lastScrollTopRef.current = node.scrollTop
-    const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 48
-    if (atBottom !== atBottomRef.current) {
-      diagEvent(`atBottom ${atBottomRef.current}→${atBottom} scrollTop=${Math.round(node.scrollTop)} sh=${node.scrollHeight} ch=${node.clientHeight}`)
-    }
-    atBottomRef.current = atBottom
-    // 只在可见性真变化时 setState，否则滚动过程中每次都重渲染整个消息树。
-    setJumpVisible((previous) => (previous === !atBottom ? previous : !atBottom))
-  }
-
-  React.useEffect(() => {
-    if (atBottomRef.current) scrollToLatest(false)
-  }, [groups, hasPending, sessionActive, scrollToLatest])
-
-  /**
-   * bundle 版本自检：fetch 服务端 index.html（no-store），对比它引用的 JS hash
-   * 与当前页面加载的 hash。不一致 = 页面是旧包（bfcache 恢复 / 标签页久开没刷上新包），
-   * 页脚红字提示硬刷新 —— 终结「改了但页面没刷上」的来回猜。
-   */
-  React.useEffect(() => {
-    const check = async (): Promise<void> => {
-      try {
-        const response = await fetch(window.location.pathname, { cache: 'no-store', credentials: 'same-origin' })
-        const html = await response.text()
-        const remote = html.match(/\/webui\/assets\/(index-[^"' ]+\.js)/)?.[1]
-        const localScript = Array.from(document.querySelectorAll('script[src*="index-"]'))
-          .map((node) => (node as HTMLScriptElement).src)
-          .find((src) => /index-[^/]+\.js/.test(src))
-        const local = localScript?.match(/(index-[^/]+\.js)/)?.[1]
-        const stale = Boolean(remote && local && remote !== local)
-        setStaleBundle(stale)
-        // 自动换新：旧包页面拉到新 index.html 后直接 reload（sessionStorage 防循环）。
-        // 否则「改了但页面没刷上」会无限来回 —— 旧包里没有这段逻辑救不了自己，
-        // 从这版起任何「至少是本版」的页面都能自愈。
-        if (stale) {
-          const key = `profer-webui-stale-reload:${remote}`
-          if (!sessionStorage.getItem(key)) {
-            sessionStorage.setItem(key, '1')
-            window.location.reload()
-          }
-        }
-      } catch {
-        /* 自检失败不影响使用 */
-      }
-    }
-    void check()
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') void check()
-    })
-  }, [])
 
   /**
    * iPhone Safari 键盘适配：软键盘弹出时不缩 layout viewport，
@@ -655,26 +716,46 @@ function App(): React.ReactElement {
   React.useEffect(() => {
     const viewport = window.visualViewport
     if (!viewport) return
+    const root = document.documentElement
     const apply = (): void => {
-      document.documentElement.style.setProperty('--app-h', `${viewport.height}px`)
+      /**
+       * 双指缩放（scale > 1）期间不做补偿。
+       *
+       * iOS 在缩放/平移过程中持续更新 visualViewport，而 fixed 元素仍按布局视口
+       * 绘制。这时继续把 .app 钉到 offsetTop/height，浏览器缩放后的画面和 JS
+       * 校正后的画面会每帧互相覆盖 —— 打开菜单后双指放大时，表现为两屏来回闪。
+       * 缩放期间回到「普通网页」行为，交给浏览器缩放/平移整页；缩回 1 后
+       * 下一个 resize/scroll 事件会重新接管键盘补偿。
+       */
+      if (viewport.scale > 1.01) {
+        root.style.removeProperty('--app-h')
+        root.style.setProperty('--app-top', '0px')
+        return
+      }
+      root.style.setProperty('--app-h', `${viewport.height}px`)
+      /**
+       * iOS 聚焦输入框时会**整体上滚布局视口**（visualViewport 出现 offsetTop），
+       * 只缩高度不跟这个偏移，固定定位的 .app 就会跑到屏幕上方去：
+       * 表现为正文消失、下面留一大片空白（点输入框后的那张截图）。
+       *
+       * 所以 .app 用 `top: var(--app-top)` 钉在**可见区域**的顶部，并把布局滚动归零；
+       * 页面本身不允许滚动（body overflow:hidden），滚动只发生在 .stream 里。
+       */
+      root.style.setProperty('--app-top', `${Math.max(0, Math.round(viewport.offsetTop))}px`)
+      if (window.scrollY !== 0) window.scrollTo(0, 0)
     }
     apply()
     viewport.addEventListener('resize', apply)
     viewport.addEventListener('scroll', apply)
+    window.addEventListener('orientationchange', apply)
     return () => {
       viewport.removeEventListener('resize', apply)
       viewport.removeEventListener('scroll', apply)
-      document.documentElement.style.removeProperty('--app-h')
+      window.removeEventListener('orientationchange', apply)
+      root.style.removeProperty('--app-h')
+      root.style.removeProperty('--app-top')
     }
   }, [])
-
-  /** 输入框自增长；先归 auto 再取 scrollHeight，否则删字后高度不会回缩。 */
-  React.useEffect(() => {
-    const node = inputRef.current
-    if (!node) return
-    node.style.height = 'auto'
-    node.style.height = `${Math.min(node.scrollHeight, 168)}px`
-  }, [input])
 
   /**
    * 重拉权威尾部。`merge` 模式按身份合并而不是整体替换 ——
@@ -698,7 +779,7 @@ function App(): React.ReactElement {
         // 先记距底距离，DOM 更新后由 prependAnchor 的 layoutEffect 还原，
         // 否则视口整体被顶到上面（「刷新后先在底部、等一会儿又跳到上面」的根因）。
         const node = scrollRef.current
-        prependAnchorRef.current = node ? node.scrollHeight - node.scrollTop : null
+        capturePrependAnchor()
         setMessages((previous) => mergeReloadPage(previous, page.messages))
       } else {
         setMessages(page.messages)
@@ -729,23 +810,95 @@ function App(): React.ReactElement {
     if (last?.type === 'assistant-turn' && !turnHasTrailingPendingTool(last)) setRunning(false)
   }, [])
 
-  /** 快照拉取：页面晚连 / 断线重连时补回已经存在的待处理交互。 */
-  const loadInteractions = React.useCallback(async (client: WsClient): Promise<void> => {
+  /**
+   * 上下文窗口水合：`context_window` 事件只在「恰好在线」时到达，
+   * 重连 / 刷新 / 事件日志过期后从这里补（快照里带 contextWindow）。
+   */
+  const loadRuntimeContext = React.useCallback(async (client: WsClient): Promise<void> => {
     try {
-      const next = decodeInteractions(await client.getPendingInteractions(sessionId))
-      setPermissions(next.permissions)
-      setAskUsers(next.askUsers)
-      setExitPlans(next.exitPlans)
-      setGoalProposals(next.goalProposals)
+      const raw = await client.sendCommand<Array<{ sessionId?: string; contextWindow?: unknown }>>({
+        type: 'get_agent_runtime_contexts',
+        sessionIds: [sessionId],
+      })
+      const entry = Array.isArray(raw) ? raw.find((item) => item?.sessionId === sessionId) : undefined
+      const value = entry?.contextWindow
+      if (typeof value === 'number' && Number.isFinite(value) && value > 0) setContextWindow(value)
     } catch {
-      // 拉取失败不打断消息读取，事件流与下一轮轮询会补上
+      // 拿不到就不显示占用条；context_window 事件到达时会补
+    }
+  }, [sessionId])
+
+  /**
+   * 技能列表：`@` 提及候选的数据源。只取 slug/name/description 三个展示字段。
+   * 列表拿不到就不弹 @ 建议 —— 提及是增强能力，不是消息发送的前置条件。
+   */
+  const loadSkills = React.useCallback(async (client: WsClient): Promise<void> => {
+    try {
+      const raw = await client.sendCommand<{ skills?: Array<{ slug?: unknown; name?: unknown; description?: unknown }> }>({
+        type: 'list_skills',
+        sessionId,
+      })
+      const list = Array.isArray(raw?.skills) ? raw.skills : []
+      setSkillOptions(list.flatMap((item) => {
+        const slug = typeof item?.slug === 'string' && item.slug ? item.slug : ''
+        if (!slug) return []
+        const name = typeof item?.name === 'string' && item.name ? item.name : slug
+        const description = typeof item?.description === 'string' ? item.description : ''
+        return [{ slug, name, description }]
+      }))
+      setSkillStatus(list.length === 0 ? 'empty' : 'ok')
+      setSkillWarning(null)
+      diagEvent(`list_skills ok：${list.length} 个技能`)
+    } catch (error) {
+      setSkillOptions([])
+      const message = error instanceof Error ? error.message : String(error)
+      // 旧主进程不认识 list_skills，默认分支回「未知指令」——直接告诉用户要重启
+      setSkillStatus(message.includes('未知指令') ? 'unsupported' : 'error')
+      setSkillWarning(message.slice(0, 80))
+      diagEvent(`list_skills 失败：${message}`)
+    }
+  }, [sessionId, diagEvent])
+
+  /**
+   * `@` 文件引用候选：从会话授权根列相对路径。
+   * query 变化时按输入重新拉（主进程做递归匹配），让深层文件也能被引用到；
+   * 每次结果合并进已有集合，树的上层目录不会因为只返回匹配项而消失。
+   */
+  const loadFiles = React.useCallback(async (client: WsClient, query = ''): Promise<void> => {
+    try {
+      type RawItem = { path?: unknown; name?: unknown; type?: unknown }
+      const raw = await client.sendCommand<{
+        session?: RawItem[]; workspace?: RawItem[]; files?: RawItem[]
+      }>({ type: 'list_workspace_files', sessionId, query })
+      // 新主进程返回 {session, workspace} 两组；旧版本返回扁平 {files}，降级成会话文件
+      const groups: Array<[RawItem[] | undefined, FileOption['source']]> = raw?.session || raw?.workspace
+        ? [[raw.session, 'session'], [raw.workspace, 'workspace']]
+        : [[raw?.files, 'session']]
+      const parsed: FileOption[] = groups.flatMap(([list, source]) =>
+        (Array.isArray(list) ? list : []).flatMap((item) => {
+          const path = typeof item?.path === 'string' && item.path ? item.path : ''
+          if (!path) return []
+          const name = typeof item?.name === 'string' && item.name ? item.name : path.split('/').pop() ?? path
+          const type: 'dir' | 'file' = item?.type === 'dir' ? 'dir' : 'file'
+          return [{ path, name, type, source }]
+        }),
+      )
+      setFileOptions((previous) => {
+        if (!query) return parsed // 空查询是全量首屏，直接替换
+        const byPath = new Map(previous.map((item) => [item.path, item]))
+        for (const item of parsed) byPath.set(item.path, item)
+        return [...byPath.values()]
+      })
+    } catch {
+      // 旧主进程不认识 list_workspace_files：@ 提及不可用，不影响发消息
+      if (!query) setFileOptions([])
     }
   }, [sessionId])
 
   /** Goal 状态完全由主进程持有，这里只做快照拉取；实时变化靠 goal_state 事件推送。 */
   const loadGoal = React.useCallback(async (client: WsClient): Promise<void> => {
     try {
-      const result = await client.getGoal(sessionId) as { goal?: unknown } | null
+      const result = await client.getGoal(sessionId) as GoalEnvelope | null
       setGoal(normalizeGoal(result?.goal))
     } catch {
       // 读取失败不打断会话读取：事件流与下一轮 run 结束都会重新拉取
@@ -755,7 +908,7 @@ function App(): React.ReactElement {
   /** 归档 Goal（清除/完成的历史）。只在状态条展开时才有内容，但清除后必须刷新，否则列表是旧的。 */
   const loadGoalHistory = React.useCallback(async (client: WsClient): Promise<void> => {
     try {
-      const result = await client.getGoalHistory(sessionId) as { goals?: unknown } | null
+      const result = await client.getGoalHistory(sessionId) as GoalHistoryEnvelope | null
       setGoalHistory(normalizeGoalHistory(result?.goals))
     } catch {
       // 历史读不到不影响当前 Goal 的展示
@@ -768,19 +921,55 @@ function App(): React.ReactElement {
    */
   const loadVisualizations = React.useCallback(async (client: WsClient): Promise<void> => {
     try {
-      const result = await client.listVisualizations(sessionId) as { records?: unknown } | null
+      const result = await client.listVisualizations(sessionId) as VisualizationEnvelope | null
       setVisualizations(normalizeVisualizations(result?.records))
     } catch {
       // 旧服务端不认这条命令时也走这里：图表缺失不该拦住消息阅读
     }
   }, [sessionId])
 
+  /** 委派子任务快照：刷新 / 重连后恢复「在跑 / 在等你」提示。 */
+  const loadDelegations = React.useCallback(async (client: WsClient): Promise<void> => {
+    try {
+      const result = await client.sendCommand<DelegationSnapshotEnvelope>({
+        type: 'get_session_delegations',
+        sessionId,
+      })
+      setDelegations(normalizeDelegations(result))
+    } catch {
+      // 旧服务端不认：按没有子任务处理，但不要清掉事件已经建立的提示
+    }
+  }, [sessionId])
+
+  /**
+   * 四类交互（权限 / 问答 / 计划审批 / Goal 提议）的队列与提交。
+   * 事件入口是 applyEvent：onAgentEvent 里一条命令就能分辨「这条事件归交互层」。
+   */
+  const interactions = useInteractions({
+    clientRef,
+    sessionId,
+    acting,
+    setActing,
+    onNotice: setNotice,
+    refreshGoal: React.useCallback(async () => {
+      const client = clientRef.current
+      if (client) await loadGoal(client)
+    }, [loadGoal]),
+  })
+  const hasPending = interactions.pendingCount > 0
+  /** 提议不阻塞运行，所以只影响「是否渲染卡片区」，不锁输入框。 */
+  const hasCards = interactions.cardCount > 0
+
+  React.useEffect(() => {
+    if (atBottomRef.current) scrollToLatest(false)
+  }, [groups, hasPending, sessionActive, scrollToLatest])
+
   /** 向上续页：只取更早的一页并前置拼接，不重拉尾部。 */  const loadOlder = React.useCallback(async (): Promise<void> => {
     const client = clientRef.current
     if (!client || loadingOlder || !hasOlder || pageStart <= 0) return
     const node = scrollRef.current
     // 记「距底部距离」而不是 scrollTop：插入内容后容器高度变了，scrollTop 会漂。
-    prependAnchorRef.current = node ? node.scrollHeight - node.scrollTop : null
+    capturePrependAnchor()
     setLoadingOlder(true)
     try {
       const page = decodeMessagePage(
@@ -796,8 +985,7 @@ function App(): React.ReactElement {
       setPageStart(page.startIndex)
       setHasOlder(page.hasMore)
       // 正在翻历史，不该被新内容拽回底部
-      atBottomRef.current = false
-      setJumpVisible(true)
+      markReadingHistory()
     } catch (error) {
       prependAnchorRef.current = null
       setNotice(`加载更早消息失败：${error instanceof Error ? error.message : String(error)}`)
@@ -812,7 +1000,7 @@ function App(): React.ReactElement {
     // 未连接 ≠ 失败：交给 TurnImage 保持「加载中」，连接就绪后它会被重试。
     if (!client || !connected) return { status: 'pending' }
     try {
-      const result = await client.readFileAsDataUrl(path, { sessionId }) as { dataUrl?: unknown } | null
+      const result = await client.readFileAsDataUrl(path, { sessionId }) as DataUrlEnvelope | null
       const dataUrl = result?.dataUrl
       if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) return { status: 'ok', dataUrl }
       return { status: 'error', message: '服务端返回的不是图片数据，可能该路径不在当前会话授权范围内' }
@@ -823,14 +1011,109 @@ function App(): React.ReactElement {
   }, [sessionId, connected])
 
   /**
+   * 任意文件读成 data URL：PDF 内嵌预览、二进制下载共用。
+   * 与图片同一条授权链（read_file_as_data_url），服务端非图片返回 application/octet-stream。
+   */
+  const loadBinary = React.useCallback(async (path: string): Promise<BinaryLoadResult> => {
+    const client = clientRef.current
+    if (!client || !connected) return { status: 'error', message: '连接尚未就绪，请稍后再试' }
+    try {
+      const result = await client.readFileAsDataUrl(path, { sessionId }) as DataUrlEnvelope | null
+      const dataUrl = result?.dataUrl
+      if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
+        return { status: 'error', message: '服务端没有返回文件内容，可能超出大小限制或不在会话授权范围' }
+      }
+      // base64 膨胀约 4/3，反推原始大小仅用于展示
+      const size = Math.floor((dataUrl.length - dataUrl.indexOf(',') - 1) * 3 / 4)
+      return { status: 'ok', dataUrl, size }
+    } catch (error) {
+      return { status: 'error', message: error instanceof Error ? error.message : String(error) }
+    }
+  }, [sessionId, connected])
+
+  /**
+   * 文本文件预览：与图片同一条授权链，只是返回正文。
+   *
+   * 走 `sendCommand` 而不是 ws-client 的具名方法：这条命令是 WebUI 专用，
+   * 没必要为了它改移动端共享客户端的公开面。
+   */
+  const loadTextPreview = React.useCallback(async (path: string): Promise<TextPreviewResult> => {
+    const client = clientRef.current
+    if (!client || !connected) return { status: 'error', message: '连接尚未就绪，请稍后再试' }
+    try {
+      const raw = await client.sendCommand<{ text?: unknown; size?: unknown; truncated?: unknown; binary?: unknown }>({
+        type: 'read_text_file',
+        filePath: path,
+        access: { sessionId },
+      })
+      const size = typeof raw?.size === 'number' ? raw.size : 0
+      if (raw?.binary === true) return { status: 'binary', size }
+      if (typeof raw?.text !== 'string') return { status: 'error', message: '服务端没有返回文件内容' }
+      return { status: 'ok', text: raw.text, truncated: raw.truncated === true, size: size || raw.text.length }
+    } catch (error) {
+      return { status: 'error', message: error instanceof Error ? error.message : String(error) }
+    }
+  }, [sessionId, connected])
+
+  /**
+   * 一次性预览页的加载器：按文件类型走已有的三条授权链，产出自包含内容。
+   * 图片/PDF/二进制拿 data URL，文本拿正文；Markdown 在父页渲染成 HTML 一起带过去。
+   */
+  const loadStandalone = React.useCallback(async (path: string): Promise<StandalonePreviewContent> => {
+    const name = fileNameOf(path)
+    if (isImageAttachment(name)) {
+      const result = await loadImage(path)
+      if (result.status === 'ok') return { kind: 'image', dataUrl: result.dataUrl }
+      if (result.status === 'error') return { kind: 'error', message: result.message }
+      return { kind: 'error', message: '连接尚未就绪，请稍后再打开' }
+    }
+    if (/\.pdf$/i.test(name)) {
+      const result = await loadBinary(path)
+      return result.status === 'ok'
+        ? { kind: 'pdf', dataUrl: result.dataUrl }
+        : { kind: 'error', message: result.message }
+    }
+    const text = await loadTextPreview(path)
+    if (text.status === 'ok') {
+      // .md 给「预览 / 原文」双视图；渲染成本在父页一次付清，预览标签页只负责展示
+      if (/\.(md|markdown)$/i.test(name)) {
+        const html = renderMarkdownToStaticHtml(text.text)
+        return {
+          kind: 'markdown',
+          text: text.text,
+          html,
+          truncated: text.truncated,
+          // 没有公式就不带 20KB+ 的 KaTeX 样式
+          katexCss: html.includes('class="katex') ? katexCss : undefined,
+        }
+      }
+      return { kind: 'text', text: text.text, truncated: text.truncated }
+    }
+    if (text.status === 'binary') {
+      const result = await loadBinary(path)
+      return result.status === 'ok'
+        ? { kind: 'binary', dataUrl: result.dataUrl }
+        : { kind: 'error', message: result.message }
+    }
+    return { kind: 'error', message: text.message }
+  }, [loadImage, loadBinary, loadTextPreview])
+
+  /** 点文件路径 / @file 引用：在新标签页打开一次性预览，可同时开多个对照看 */
+  const openFile = React.useCallback((path: string): void => {
+    if (!openStandalonePreview(path, loadStandalone)) {
+      setNotice('浏览器拦截了新标签页，请允许本页面的弹出窗口后重试')
+    }
+  }, [loadStandalone])
+
+  /**
    * 会话信息（标题 / 模型 / 工作区 / 权限模式）。
    *
    * 标题不是一次性的：新会话的标题由模型在首轮之后自动生成，页面在这一轮之前打开时
    * 拿到的是空标题，所以轮次结束后要重新取一次。
    */
-  const loadSessionMeta = React.useCallback(async (client: WsClient): Promise<Record<string, unknown> | null> => {
+  const loadSessionMeta = React.useCallback(async (client: WsClient): Promise<SessionMetaPayload | null> => {
     try {
-      const detail = await client.sessionDetail(sessionId) as { meta?: Record<string, unknown>; data?: { meta?: Record<string, unknown> } } | null
+      const detail = await client.sessionDetail(sessionId) as SessionDetailEnvelope | null
       const raw = detail?.meta ?? detail?.data?.meta ?? null
       if (!raw) return null
       setMeta({
@@ -847,7 +1130,14 @@ function App(): React.ReactElement {
         presetReference: isPresetReference(raw.presetReference) ? raw.presetReference : null,
         workspaceSlug: typeof raw.workspaceSlug === 'string' ? raw.workspaceSlug : undefined,
         revision: typeof raw.revision === 'number' ? raw.revision : undefined,
+        // 落盘的中断信息：刷新后据此恢复结局行（事件流里拿不到上一轮结局）
+        lastInterruptReason: typeof raw.lastInterruptReason === 'string' ? raw.lastInterruptReason : undefined,
+        lastInterruptLabel: typeof raw.lastInterruptLabel === 'string' ? raw.lastInterruptLabel : undefined,
+        lastInterruptAt: typeof raw.lastInterruptAt === 'number' ? raw.lastInterruptAt : undefined,
+        stoppedByUser: raw.stoppedByUser === true,
       })
+      // 服务端知道「这一轮到底还在不在跑」，顺手对齐一次本地推断
+      setServerActive(raw.active === true)
       // 返回原始 meta：连接建立这一轮里 state 还没刷新，预设加载要直接用这份 workspaceSlug
       return raw
     } catch (error) {
@@ -877,8 +1167,18 @@ function App(): React.ReactElement {
    * 作用域必须是会话所属工作区的 slug：不传 slug 时服务端只会返回内置默认配置，
    * 用户自己建的岗位会凭空消失。连接建立这一轮 state 还没刷新，所以允许显式传 slug。
    */
+  /**
+   * 会话所属工作区 slug 的实时镜像。
+   *
+   * 不能直接把它放进 `loadPresets` 的依赖：连接 effect 依赖 `loadPresets`，而 meta 是在
+   * 连接建立之后才由 `loadSessionMeta` 写入的 —— 依赖它等于「一拿到会话信息就重建连接」。
+   * 后果不只是浪费：旧的那条初始化链会在已经 disconnect 的 client 上继续发命令，
+   * `reload` 必然被拒，于是首屏弹一条「读取会话失败：连接未就绪」的假报错。
+   */
+  const workspaceSlugRef = React.useRef<string | undefined>(undefined)
+  workspaceSlugRef.current = meta?.workspaceSlug
   const loadPresets = React.useCallback(async (client: WsClient, explicitSlug?: string): Promise<void> => {
-    const slug = explicitSlug ?? meta?.workspaceSlug
+    const slug = explicitSlug ?? workspaceSlugRef.current
     try {
       const [raw, fallback] = await Promise.all([
         client.listPresets(slug),
@@ -891,7 +1191,7 @@ function App(): React.ReactElement {
       // 旧服务端或权限不足：只影响预设菜单，聊天照常
       setPresetsLoaded(true)
     }
-  }, [meta?.workspaceSlug])
+  }, [])
 
   /**
    * Pi 内核的模型自带推理档位（off/minimal/low/…/max），Claude 内核只有 effort 四档。
@@ -907,7 +1207,7 @@ function App(): React.ReactElement {
     void client.getPiReasoningCapability(channel.provider, meta.modelId, channel.baseUrl)
       .then((capability) => {
         if (cancelled) return
-        const levels = (capability as { levels?: unknown } | null)?.levels
+        const levels = (capability as PiReasoningCapabilityEnvelope | null)?.levels
         setReasoningLevels(Array.isArray(levels)
           ? levels.filter((level): level is string => typeof level === 'string' && level.length > 0)
           : null)
@@ -924,6 +1224,7 @@ function App(): React.ReactElement {
       setConnection('缺少会话 ID 或访问凭据')
       return
     }
+    setHistoryLoaded(false)
     // WsClient.sendCommand 在 onopen 之前会直接 reject「连接未就绪」，
     // 因此先备好「首次连接就绪」的 Promise，等 open 后再取会话详情与历史消息。
     let markReady!: () => void
@@ -939,7 +1240,7 @@ function App(): React.ReactElement {
           // 重连计数：桌面浏览器冻结后台标签页、回来时 WS 重连 + 事件重放，
           // 重放路径与实时流的帧标记不同（isReplay），是「电脑复现 iPhone 不复现」
           // 的重点嫌疑。诊断浮层会显示它。
-          reconnectCountRef.current += 1
+          noteReconnect()
           markReady()
         }
         else if (state === 'unauthorized') { setConnection('凭据无效'); setConnected(false) }
@@ -964,20 +1265,7 @@ function App(): React.ReactElement {
       },
       onAgentEvent: (event) => {
         if (event.sessionId !== sessionId) return
-        const payload = event.payload as {
-          kind?: string
-          message?: SDKMessage
-          event?: {
-            type?: string
-            request?: Record<string, unknown>
-            requestId?: string
-            goal?: unknown
-            proposal?: unknown
-            proposalId?: string
-            mode?: unknown
-            record?: unknown
-          }
-        } | null
+        const payload = event.payload as AgentEventPayload | null
         if (payload?.kind === 'sdk_message' && payload.message) {
           setMessages((previous) => upsertMessage(previous, payload.message as SDKMessage))
           // 只有真正的内容消息才算「又在跑了」。result / system / prompt_suggestion 这类
@@ -994,6 +1282,11 @@ function App(): React.ReactElement {
         const request = proferEvent?.request
         // Goal 每次状态变化主进程都会推一条完整状态，这里整体替换 ——
         // 状态机在电脑端，网页不做任何本地推断（重启/重连后也不会漂移）。
+        if (type === 'context_window') {
+          const value = proferEvent?.contextWindow
+          if (typeof value === 'number' && Number.isFinite(value) && value > 0) setContextWindow(value)
+          return
+        }
         if (type === 'goal_state') {
           const next = normalizeGoal(proferEvent?.goal)
           setGoal(next)
@@ -1001,33 +1294,9 @@ function App(): React.ReactElement {
           if (!next) void loadGoalHistory(client)
           return
         }
-        // 三类阻塞交互：request 入队、resolved 出队，口径与桌面端横幅一致。
-        if (type === 'permission_request' && request) {
-          const item = normalizePermissionItems([request])[0]
-          if (item) setPermissions((previous) => upsertById(previous, item))
-        } else if (type === 'permission_resolved') {
-          setPermissions((previous) => previous.filter((item) => item.requestId !== proferEvent?.requestId))
-        } else if (type === 'ask_user_request' && request) {
-          const item = normalizeAskUserItems([request])[0]
-          if (item) setAskUsers((previous) => upsertById(previous, item))
-        } else if (type === 'ask_user_resolved') {
-          setAskUsers((previous) => previous.filter((item) => item.requestId !== proferEvent?.requestId))
-        } else if (type === 'exit_plan_mode_request' && request) {
-          const item = normalizeExitPlanItems([request])[0]
-          if (item) setExitPlans((previous) => upsertById(previous, item))
-        } else if (type === 'exit_plan_mode_resolved') {
-          setExitPlans((previous) => previous.filter((item) => item.requestId !== proferEvent?.requestId))
-        } else if (type === 'goal_proposal' && proferEvent?.proposal) {
-          // 提议不阻塞运行：模型提议后这一轮照常跑完，用户批准才由状态机接管后续轮次。
-          const item = normalizeGoalProposals([proferEvent.proposal])[0]
-          if (item) {
-            setGoalProposals((previous) => previous.some((entry) => entry.id === item.id)
-              ? previous.map((entry) => (entry.id === item.id ? item : entry))
-              : [...previous, item])
-          }
-        } else if (type === 'goal_proposal_resolved') {
-          setGoalProposals((previous) => previous.filter((item) => item.id !== proferEvent?.proposalId))
-        } else if (type === 'permission_mode_changed') {
+        // 交互类事件交给交互层（四条队列的入队/出队口径集中在那里）。
+        if (proferEvent && interactions.applyEvent(proferEvent)) return
+        if (type === 'permission_mode_changed') {
           // 批准计划时主进程会把会话切出 plan 模式。不同步 meta 的话，
           // 下一次发送仍带着 permissionMode:'plan' 这个 override，会立刻又进回计划模式。
           const mode = normalizePermissionMode(proferEvent?.mode)
@@ -1040,18 +1309,49 @@ function App(): React.ReactElement {
               ? previous.map((entry) => (entry.id === item.id ? item : entry))
               : [...previous, item])
           }
+        } else if (type === 'delegation_session_updated' && proferEvent?.session) {
+          // 子会话状态变化：终态移出提示，运行中更新标题/角色/目标。
+          const session = proferEvent.session as unknown as AgentSessionMeta
+          setDelegations((previous) => applyDelegationSessionUpdate(previous, session, sessionId))
+        } else if (type === 'delegation_blocked') {
+          // 阻塞事件是「子任务在等你」的唯一强信号：快照没刷新也能先把提示亮起来。
+          const update = normalizeBlockedEvent(proferEvent)
+          if (update) setDelegations((previous) => applyDelegationBlocked(previous, update))
+        } else if (type === 'delegation_blocked_resolved') {
+          setDelegations((previous) => resolveDelegationBlocked(previous, {
+            delegationId: typeof proferEvent?.delegationId === 'string' ? proferEvent.delegationId : undefined,
+            blockedEventId: typeof proferEvent?.blockedEventId === 'string' ? proferEvent.blockedEventId : undefined,
+            requestId: typeof proferEvent?.requestId === 'string' ? proferEvent.requestId : undefined,
+          }))
+        }
+        if (type === 'retry') {
+          const transition = normalizeRetryEvent(proferEvent ?? {})
+          if (transition?.action === 'set') setRetryInfo(transition.info)
+          else if (transition?.action === 'clear') setRetryInfo(null)
+        }
+        if (type === 'session_persistence') {
+          // 只有落盘失败值得打断阅读；saved / pending 都当作恢复（收起告警）。
+          const transition = normalizePersistenceEvent(proferEvent ?? {})
+          if (transition?.action === 'warn') setPersistenceWarning(transition.warning)
+          else if (transition?.action === 'clear') setPersistenceWarning(null)
         }
         // run_completed 与 run_idle 会在同一轮先后到达，3 秒内只收敛一次「重拉」副作用。
         // 但 setRunning(false) 必须每次都执行：以前它也被节流吞掉，连着两轮时
         // 第二轮的 completion 不生效，过程组就一直保持展开。
         if (type === 'run_completed' || type === 'run_idle') {
+          if (type === 'run_completed' && proferEvent) {
+            // 结局与后台任务只用真终态更新；run_idle 不带这些字段，别把结局冲掉。
+            setRunOutcome(normalizeRunOutcomeEvent(proferEvent))
+            setBackgroundPending(proferEvent.backgroundTasksPending === true)
+            setRetryInfo(null)
+          }
           setRunning(false)
+          setServerActive(false)
           setCompacting(false)
           // compacting 是 run 中瞬态（WS 广播有、JSONL 不落盘），合并重拉不会删它 ——
           // run 结束必须清场，否则「正在压缩上下文...」永久残留（两次压缩留两行）。
           // 变矮前记距底距离走 prependAnchor 还原，否则视口被顶上去。
-          const streamNode = scrollRef.current
-          prependAnchorRef.current = streamNode ? streamNode.scrollHeight - streamNode.scrollTop : null
+          capturePrependAnchor()
           setMessages((previous) => previous.filter((message) =>
             !(message.type === 'system' && (message as { subtype?: unknown }).subtype === 'compacting')))
           const now = Date.now()
@@ -1060,6 +1360,8 @@ function App(): React.ReactElement {
             void reload(client, 'merge')
             void loadGoal(client)
             void loadVisualizations(client)
+            // 每轮结束刷新子任务快照：委派记录是轮末才稳定的
+            void loadDelegations(client)
             // 首轮之后标题才会被自动生成，结束后重新取一次，标签页才不会一直停在兜底文案
             void loadSessionMeta(client)
           }
@@ -1083,11 +1385,13 @@ function App(): React.ReactElement {
       diagEvent(`wake visibility=${document.visibilityState}`)
       // merge：切窗口可能切在流式中，替换会把在飞的正文冲掉且不恢复
       void reload(client, 'merge').then(calibrateRunning)
+      // 后台期间错过的轮末刷新在这里补一次：子任务快照不重放事件
+      void loadDelegations(client)
     }
     document.addEventListener('visibilitychange', wake)
     window.addEventListener('online', wake)
     // 5 秒兜底轮询，覆盖事件丢失与重连；与桌面端 pending-interaction 收敛节奏一致。
-    const poll = window.setInterval(() => { void loadInteractions(client) }, 5000)
+    const poll = window.setInterval(() => { void interactions.loadInteractions(client) }, 5000)
     void (async () => {
       const opened = await Promise.race([
         ready.then(() => true),
@@ -1098,15 +1402,30 @@ function App(): React.ReactElement {
         setNotice('连接超时，请确认 Profer 的 Web 会话已启用后刷新页面重试')
         return
       }
+      // 每一步 await 之后都要重新看一眼 cancelled：依赖变化（sessionId / token）会先 cleanup
+      // 再重建连接，旧链若继续跑就会在已断开的 client 上发命令，把「连接未就绪」当业务错误弹给用户。
       // 会话信息失败不该拦住消息读取：loadSessionMeta 自己吞掉异常，只留一条 notice
       const rawMeta = await loadSessionMeta(client)
+      if (cancelled) return
       await loadChannels(client)
+      if (cancelled) return
       await loadPresets(client, typeof rawMeta?.workspaceSlug === 'string' ? rawMeta.workspaceSlug : undefined)
+      if (cancelled) return
       await reload(client)
-      await loadInteractions(client)
+      if (cancelled) return
+      setHistoryLoaded(true)
+      await interactions.loadInteractions(client)
+          void loadRuntimeContext(client)
+          void loadSkills(client)
+          void loadFiles(client)
+      if (cancelled) return
       await loadGoal(client)
+      if (cancelled) return
       await loadGoalHistory(client)
+      if (cancelled) return
       await loadVisualizations(client)
+      // 锦上添花：旧服务端不认识时会在内部吞错，不阻塞首屏
+      void loadDelegations(client)
     })()
     return () => {
       cancelled = true
@@ -1116,65 +1435,12 @@ function App(): React.ReactElement {
       client.disconnect()
       clientRef.current = null
     }
-  }, [sessionId, token, reload, calibrateRunning, loadInteractions, loadGoal, loadGoalHistory, loadVisualizations, loadSessionMeta, loadPresets])
-
-  const respondPermission = React.useCallback(async (
-    requestId: string,
-    behavior: 'allow' | 'deny',
-    alwaysAllow = false,
-  ): Promise<void> => {
-    const client = clientRef.current
-    if (!client || acting) return
-    setActing(true)
-    try {
-      await client.respondPermission(requestId, behavior, alwaysAllow)
-      setPermissions((previous) => previous.filter((item) => item.requestId !== requestId))
-      await loadInteractions(client)
-    } catch (error) {
-      setNotice(`权限响应失败：${error instanceof Error ? error.message : String(error)}`)
-    } finally {
-      setActing(false)
-    }
-  }, [acting, loadInteractions])
-
-  const respondAskUser = React.useCallback(async (requestId: string, answers: Record<string, string>): Promise<void> => {
-    const client = clientRef.current
-    if (!client || acting) return
-    setActing(true)
-    try {
-      await client.respondAskUser(requestId, answers)
-      setAskUsers((previous) => previous.filter((item) => item.requestId !== requestId))
-      await loadInteractions(client)
-    } catch (error) {
-      setNotice(`回答提交失败：${error instanceof Error ? error.message : String(error)}`)
-    } finally {
-      setActing(false)
-    }
-  }, [acting, loadInteractions])
-
-  const respondExitPlan = React.useCallback(async (
-    requestId: string,
-    action: ExitPlanAction,
-    feedback?: string,
-  ): Promise<void> => {
-    const client = clientRef.current
-    if (!client || acting) return
-    setActing(true)
-    try {
-      await client.respondExitPlanMode(requestId, action, feedback)
-      setExitPlans((previous) => previous.filter((item) => item.requestId !== requestId))
-      await loadInteractions(client)
-    } catch (error) {
-      setNotice(`计划审批失败：${error instanceof Error ? error.message : String(error)}`)
-    } finally {
-      setActing(false)
-    }
-  }, [acting, loadInteractions])
+  }, [sessionId, token, reload, calibrateRunning, interactions.loadInteractions, loadRuntimeContext, loadSkills, loadGoal, loadGoalHistory, loadVisualizations, loadDelegations, loadSessionMeta, loadPresets])
 
   /** Goal 控制：全部转发给主进程状态机，本地只按返回值刷新展示。 */
-  const runGoalAction = React.useCallback(async (action: GoalAction): Promise<void> => {
+  const runGoalAction = React.useCallback(async (action: GoalAction): Promise<boolean> => {
     const client = clientRef.current
-    if (!client || acting) return
+    if (!client || acting) return false
     setActing(true)
     try {
       if (action === 'pause') await client.pauseGoal(sessionId)
@@ -1185,30 +1451,113 @@ function App(): React.ReactElement {
         setGoal(null)
         // 清除 = 归档，立刻刷历史，展开区不用等下一次事件
         await loadGoalHistory(client)
-        return
+        return true
       }
       await loadGoal(client)
+      return true
     } catch (error) {
       setNotice(`Goal 操作失败：${error instanceof Error ? error.message : String(error)}`)
+      return false
     } finally {
       setActing(false)
     }
   }, [acting, loadGoal, loadGoalHistory, sessionId])
 
   /** 启动 Goal；契约是可选项，只有填了的字段才会带上。 */
-  const startGoal = React.useCallback(async (text: string, contract?: GoalContract): Promise<void> => {
+  const startGoal = React.useCallback(async (text: string, contract?: GoalContract): Promise<boolean> => {
     const client = clientRef.current
-    if (!client || acting) return
+    if (!client || acting) return false
     setActing(true)
     try {
       await client.startGoal({ sessionId, goal: text, ...(contract ? { contract } : {}) })
       await loadGoal(client)
+      return true
     } catch (error) {
       setNotice(`设定目标失败：${error instanceof Error ? error.message : String(error)}`)
+      return false
     } finally {
       setActing(false)
     }
   }, [acting, loadGoal, sessionId])
+
+  /**
+   * `/goal` 命令：与桌面端同一套语法（`parseGoalCommand`），执行走 WS 的 goal 命令。
+   *
+   * 命令本身不是消息 —— 命中后不再进入发送/排队路径，也不会被当成正文发给模型。
+   * 返回「是否成功」，调用方据此决定要不要清空输入框（invalid 时必须留着让用户改）。
+   */
+  const runGoalCommand = React.useCallback(async (command: GoalCommand): Promise<boolean> => {
+    if (command.type === 'not_goal') return false
+    if (command.type === 'invalid') {
+      setNotice(command.reason)
+      return false
+    }
+    const client = clientRef.current
+    if (!client || !connected) {
+      setNotice('连接未就绪，稍后再试')
+      return false
+    }
+    if (command.type === 'start') {
+      // 服务端不允许在「有未完成 Goal」时直接 start（会报错），所以先让用户确认替换
+      if (goal && goal.status !== 'completed') {
+        setPendingGoalStart({ goal: command.goal, ...(command.contract ? { contract: command.contract } : {}) })
+        return true
+      }
+      const started = await startGoal(command.goal, command.contract)
+      if (started) setNotice('Goal 已启动')
+      return started
+    }
+    if (command.type === 'status') {
+      if (!goal) {
+        setNotice('当前没有 Goal，用「/goal <目标>」发起一个')
+        return true
+      }
+      const label = goalStatusLabel(
+        goal,
+        { askUser: interactions.askUsers.length, permission: interactions.permissions.length },
+        Date.now(),
+      )
+      const budget = formatGoalBudget(goal.limits)
+      setNotice(`Goal：${label} · 第 ${goal.iteration} 轮${budget ? ` · 预算 ${budget}` : ''}`)
+      return true
+    }
+    const done = await runGoalAction(command.type)
+    if (done) {
+      setNotice({
+        pause: 'Goal 已暂停',
+        resume: 'Goal 已恢复',
+        stop: 'Goal 已停止',
+        clear: 'Goal 已清除并归档',
+      }[command.type])
+    }
+    return done
+  }, [connected, goal, interactions.askUsers.length, interactions.permissions.length, runGoalAction, startGoal])
+
+  /**
+   * 替换当前 Goal：先 clear（归档旧目标）再 start。
+   *
+   * 不能复用 `startGoal` 回调：它带 `acting` 守卫，而这里已经置了 acting，
+   * 直接调会被静默拒绝（点了没反应）。
+   */
+  const replaceGoal = React.useCallback(async (): Promise<void> => {
+    const client = clientRef.current
+    const next = pendingGoalStart
+    if (!client || !next) return
+    setActing(true)
+    try {
+      await client.clearGoal(sessionId)
+      setGoal(null)
+      await loadGoalHistory(client)
+      await client.startGoal({ sessionId, goal: next.goal, ...(next.contract ? { contract: next.contract } : {}) })
+      await loadGoal(client)
+      setPendingGoalStart(null)
+      setNotice('已替换目标')
+    } catch (error) {
+      setNotice(`替换目标失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setActing(false)
+    }
+  }, [pendingGoalStart, sessionId, loadGoalHistory, loadGoal])
 
   /**
    * 保存目标/契约/预算；`resume` 为真时接着恢复。
@@ -1341,36 +1690,6 @@ function App(): React.ReactElement {
   }
 
   /**
-   * Goal 提议确认。
-   *
-   * 批准失败时主进程**故意保留**提议（不出队），所以这里不能乐观删卡片：
-   * 只提示失败原因并重拉一次快照，用户可以直接重试。
-   */
-  const respondGoalProposal = React.useCallback(async (proposalId: string, accepted: boolean): Promise<void> => {
-    const client = clientRef.current
-    if (!client || acting) return
-    setActing(true)
-    try {
-      await client.respondGoalProposal(proposalId, accepted)
-      setGoalProposals((previous) => previous.filter((item) => item.id !== proposalId))
-      await loadInteractions(client)
-      await loadGoal(client)
-    } catch (error) {
-      setNotice(`Goal 提议处理失败：${error instanceof Error ? error.message : String(error)}`)
-      await loadInteractions(client)
-    } finally {
-      setActing(false)
-    }
-  }, [acting, loadInteractions, loadGoal])
-
-  const interactionHandlers = React.useMemo<InteractionHandlers>(() => ({
-    onPermission: (id, behavior, alwaysAllow) => { void respondPermission(id, behavior, alwaysAllow) },
-    onAskUser: (id, answers) => { void respondAskUser(id, answers) },
-    onExitPlan: (id, action, feedback) => { void respondExitPlan(id, action, feedback) },
-    onGoalProposal: (id, accepted) => { void respondGoalProposal(id, accepted) },
-  }), [respondPermission, respondAskUser, respondExitPlan, respondGoalProposal])
-
-  /**
    * 切换会话的权限模式。
    *
    * 这里必须走服务端命令，而不是在页面里「代用户点允许」：
@@ -1393,109 +1712,183 @@ function App(): React.ReactElement {
     }
   }, [sessionId, switchingMode, meta])
 
-  /** 附件：ready 的才随消息发出，uploading 或 error 的都挡在发送之前。 */
-  const readyAttachments = attachments.filter((item) => item.status === 'ready')
-  const uploadingAttachments = attachments.some((item) => item.status === 'uploading')
   /** 有正文或已就绪附件就能发；上传中不许发（否则会发出一条缺文件的消息）。 */
   const canSend = Boolean(
     (input.trim() || readyAttachments.length > 0) && connected && !busy && !hasPending && !uploadingAttachments,
   )
 
-  const pickFiles = (files: FileList | null): void => {
-    if (!files || files.length === 0) return
+  /**
+   * 真正发出去（空闲路径）：透传会话当前权限模式与附件。
+   * 抽成独立函数是因为「停止本轮后重发」也要走它。
+   */
+  const sendText = React.useCallback(async (
+    text: string,
+    attachmentsToSend: ReadonlyArray<{ filename: string }>,
+  ): Promise<void> => {
+    const mentionedSkills = extractMentionedSkills(text)
     const client = clientRef.current
-    if (!client || !connected) {
-      setNotice('连接未就绪，暂时无法上传附件')
-      return
-    }
-    for (const file of Array.from(files)) {
-      const staged = attachmentsRef.current.filter((item) => item.status !== 'error').length
-      const invalid = validateAttachmentFile(file, staged)
-      const key = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-      if (invalid) {
-        // 放进列表而不是只弹一条 notice：用户要能看出是哪个文件被拒了
-        setAttachments((previous) => [...previous, {
-          key, filename: file.name || '未命名文件', size: file.size, status: 'error', error: invalid,
-        }])
-        continue
-      }
-      setAttachments((previous) => [...previous, {
-        key, filename: file.name, size: file.size, status: 'uploading',
-      }])
-      const reader = new FileReader()
-      reader.onerror = () => {
-        setAttachments((previous) => previous.map((item) => (item.key === key
-          ? { ...item, status: 'error', error: '读取文件失败' }
-          : item)))
-      }
-      reader.onload = () => {
-        const base64 = base64FromDataUrl(String(reader.result ?? ''))
-        if (!base64) {
-          setAttachments((previous) => previous.map((item) => (item.key === key
-            ? { ...item, status: 'error', error: '文件内容为空' }
-            : item)))
-          return
-        }
-        void client.saveAgentAttachment(sessionId, file.name, base64)
-          .then((result) => {
-            const saved = result as { filename?: unknown } | null
-            const filename = typeof saved?.filename === 'string' && saved.filename ? saved.filename : file.name
-            setAttachments((previous) => previous.map((item) => (item.key === key
-              // 服务端遇到同名会加序号，必须记返回值里的文件名，否则发消息时解析不到
-              ? { ...item, status: 'ready', filename }
-              : item)))
-          })
-          .catch((error: unknown) => {
-            setAttachments((previous) => previous.map((item) => (item.key === key
-              ? { ...item, status: 'error', error: error instanceof Error ? error.message : '上传失败' }
-              : item)))
-          })
-      }
-      reader.readAsDataURL(file)
-    }
-  }
+    if (!client) throw new Error('连接已断开')
+    if (!meta?.channelId) throw new Error('尚未取到会话渠道信息')
+    await client.sendMessage({
+      sessionId,
+      userMessage: text,
+      channelId: meta.channelId,
+      modelId: meta.modelId,
+      workspaceId: meta.workspaceId,
+      // 必须透传会话当前的权限模式：服务端把它作为本轮 override。
+      // 写死 'auto' 会把会话的「完全自动」降级成每步都要确认（历史 bug）。
+      permissionMode: meta.permissionMode ?? 'bypassPermissions',
+      // 让主进程把这条消息标成「网页发的」，桌面端与手机上都能看出处
+      clientKind: 'webui',
+      // 正文里的 /skill:<slug> token 同步传一份：主进程用它做技能路由（加载技能）
+      ...(mentionedSkills.length > 0 ? { mentionedSkills } : {}),
+      ...(attachmentsToSend.length > 0 ? { attachments: [...attachmentsToSend] } : {}),
+    })
+  }, [meta, sessionId])
 
+  /** 新的一轮开始后，上一轮的结局与「正在重试」就不再适用于会话尾部。 */
+  const clearPreviousRunStatus = React.useCallback((): void => {
+    setRunOutcome(null)
+    setRetryInfo(null)
+  }, [])
+
+  /** 运行中追加（Claude 支持流式追加；Pi 会回 QUEUE_UNSUPPORTED） */
+  const queueText = React.useCallback(async (text: string): Promise<void> => {
+    const client = clientRef.current
+    if (!client) throw new Error('连接已断开')
+    await client.queueMessage({
+      sessionId,
+      userMessage: text,
+      clientKind: 'webui',
+      ...(extractMentionedSkills(text).length > 0 ? { mentionedSkills: extractMentionedSkills(text) } : {}),
+    })
+  }, [sessionId])
+
+  /**
+   * 发送入口：先判「是否在跑」，在跑就排队；排队不可用时给「停止并发送」的确认。
+   *
+   * 为什么不能只按 `sessionActive` 分支：它是事件流推断的结果，刷新/重连/断帧之后会落后，
+   * 于是对正在跑的会话发 `send_message`，被 claim 拒绝并弹一条红字（用户看到的
+   * 「AGENT_RUN_ALREADY_ACTIVE」）。现在两个方向都兜住：
+   * ① `server_detail.active` 对齐运行态；② 真被拒时把运行态置真、改走排队。
+   */
   const send = async (): Promise<void> => {
     const client = clientRef.current
     if (busy || !client) return
+    // 通知权限只能在用户手势里申请：把申请挂在发送这个动作上，不打扰首次打开
+    requestNotifyPermission()
     if (uploadingAttachments) {
       setNotice('附件还在上传，请稍候')
       return
     }
     const text = resolveSendText(input, readyAttachments.length)
     if (!text) return
+    /**
+     * `/goal` 是**客户端命令**（与桌面端同一语法），不是消息：
+     * 命中后不进入发送/排队路径，也不会被当成正文发给模型。
+     */
+    const goalCommand = parseGoalCommand(text)
+    if (goalCommand.type !== 'not_goal') {
+      const handled = await runGoalCommand(goalCommand)
+      // 失败（例如「目标不能为空」）要保留原文让用户改
+      if (handled) setInput('')
+      return
+    }
     if (!meta?.channelId) {
       setNotice('尚未取到会话渠道信息，请稍候或刷新页面')
       return
     }
+    const attachmentsToSend = readyAttachments.map((item) => ({ filename: item.filename }))
+    const runningNow = sessionActive || serverActive
+    // 排队通道没有附件能力：明说，而不是静默丢掉文件
+    if (runningNow && attachmentsToSend.length > 0) {
+      setNotice('运行中不能附带文件，请等本轮结束后再发')
+      return
+    }
+
     setBusy(true)
     try {
-      // 必须透传会话当前的权限模式：服务端把它作为本轮 override。
-      // 写死 'auto' 会把会话的「完全自动」降级成每步都要确认（历史 bug）。
-      await client.sendMessage({
-        sessionId,
-        userMessage: text,
-        channelId: meta.channelId,
-        modelId: meta.modelId,
-        workspaceId: meta.workspaceId,
-        permissionMode: meta.permissionMode ?? 'bypassPermissions',
-        // 让主进程把这条消息标成「网页发的」，桌面端与手机上都能看出处
-        clientKind: 'webui',
-        ...(readyAttachments.length > 0
-          ? { attachments: readyAttachments.map((item) => ({ filename: item.filename })) }
-          : {}),
-      })
+      if (runningNow) {
+        await queueText(text)
+        setInput('')
+        clearPreviousRunStatus()
+        setNotice('已加入队列，本轮结束后自动发送')
+        return
+      }
+      try {
+        await sendText(text, attachmentsToSend)
+      } catch (error) {
+        // 客户端的运行态落后于服务端：claim 拒绝就是「其实在跑」
+        if (!isRunActiveError(error)) throw error
+        setServerActive(true)
+        setRunning(true)
+        try {
+          await queueText(text)
+          setInput('')
+          clearPreviousRunStatus()
+          setNotice('本轮仍在运行，已加入队列')
+          return
+        } catch (queueError) {
+          if (!isQueueUnsupportedError(queueError)) throw queueError
+          setStopSendText(text)
+          return
+        }
+      }
       setInput('')
-      setAttachments([])
+      clearAttachments()
+      clearPreviousRunStatus()
       setRunning(true)
+      setServerActive(true)
       setNotice('')
     } catch (error) {
+      if (isQueueUnsupportedError(error)) {
+        setStopSendText(text)
+        return
+      }
       // 失败保留附件与文案：重试时不该让用户重新挑一遍文件
       setNotice(`发送失败：${error instanceof Error ? error.message : String(error)}`)
     } finally {
       setBusy(false)
     }
   }
+
+  /**
+   * 「停止本轮并发送」：当前内核不支持追加时的唯一出路。
+   *
+   * 停止是异步的：`stop_agent` 返回后 claim 可能还没释放，所以用短轮询重试发送
+   * （只在「运行中」这一种错误上重试 —— 那种情况服务端一定没接收这条消息，不会重复发）。
+   */
+  const stopAndSend = React.useCallback(async (): Promise<void> => {
+    const client = clientRef.current
+    const text = stopSendText
+    if (!client || !text) return
+    setActing(true)
+    setStopSendText(null)
+    try {
+      await client.stopAgent(sessionId)
+      setRunning(false)
+      setServerActive(false)
+      let lastError: unknown = null
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 400))
+        try {
+          await sendText(text, [])
+          setInput('')
+          clearPreviousRunStatus()
+          setNotice('已停止上一轮并发送')
+          return
+        } catch (error) {
+          if (!isRunActiveError(error)) throw error
+          lastError = error
+        }
+      }
+      setNotice(`停止后仍显示运行中：${lastError instanceof Error ? lastError.message : '请稍后手动发送'}`)
+    } catch (error) {
+      setNotice(`停止失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setActing(false)
+    }
+  }, [stopSendText, sessionId, sendText, clearPreviousRunStatus])
 
   const stop = async (): Promise<void> => {
     try {
@@ -1506,6 +1899,196 @@ function App(): React.ReactElement {
     }
   }
 
+  /** 操作面板对应的回合（面板关闭后数据不闪：只在有目标时计算） */
+  const actionTarget = React.useMemo(() => {
+    if (actionsTurn === null) return null
+    const group = groups[actionsTurn]
+    const turn = turns.find((entry) => entry.index === actionsTurn)
+    if (!group || group.type !== 'user' || !turn) return null
+    const uuid = (group.message as { uuid?: unknown }).uuid
+    return {
+      text: stripContextBlocks(turn.text),
+      userUuid: typeof uuid === 'string' && uuid ? uuid : '',
+    }
+  }, [actionsTurn, groups, turns])
+
+  const copyActionText = React.useCallback(async (): Promise<void> => {
+    if (!actionTarget) return
+    const ok = await copyText(actionTarget.text)
+    setNotice(ok ? '已复制' : '复制失败，请长按选择文字复制')
+  }, [actionTarget])
+
+  /** 解析「上一条 assistant 消息」：回退目标指向它之后 = 删掉目标用户消息及之后全部 */
+  const resolveAssistantUuid = React.useCallback(
+    (turnIndex: number): string | undefined => findPreviousAssistantUuid(groups, turnIndex),
+    [groups],
+  )
+
+  /** 仅对话回退（legacy rewind_session）：服务端 prepare+execute 一步完成 */
+  const rewindLegacy = React.useCallback(async (text: string, assistantUuid?: string): Promise<void> => {
+    const client = clientRef.current
+    if (!client) return
+    setActing(true)
+    try {
+      await client.rewindSession({ sessionId, ...(assistantUuid ? { assistantMessageUuid: assistantUuid } : {}) })
+      setServerActive(false)
+      setRunning(false)
+      await reload(client, 'replace')
+      await interactions.loadInteractions(client)
+      clearPreviousRunStatus()
+      if (text) setInput(text)
+      inputRef.current?.focus()
+      setNotice('已回退到这条消息之前，改完可以直接发送')
+    } catch (error) {
+      setNotice(`回退失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setActing(false)
+    }
+  }, [sessionId, reload, interactions.loadInteractions])
+
+  /**
+   * 「重试上一轮」的目标：最新一条用户消息 + 它之前的助手锚点。
+   *
+   * 只对 failed / limited 的结局开放（停止是主动行为，不是失败）。
+   * 带附件的轮次不给按钮：回退只截对话，重发只带正文，静默丢附件比不给按钮更糟。
+   * 首轮失败没有回退锚点，和桌面端一样走 session-start（清空整段对话）后重发。
+   */
+  const retryTarget = React.useMemo(() => {
+    if (effectiveOutcome?.kind !== 'failed' && effectiveOutcome?.kind !== 'limited') return null
+    // acting 不参与判定：重试进行中要保留按钮显示「重试中…」，由按钮 disabled 防重入
+    if (sessionActive || busy || hasPending || !connected || !meta?.channelId) return null
+    return resolveRetryTurn(groups, turns)
+  }, [effectiveOutcome, sessionActive, busy, hasPending, connected, meta, groups, turns])
+
+  /** 截断最后一轮并重发同一句；截断成功但发送失败时把原文放回输入框。 */
+  const retryLastTurn = React.useCallback(async (): Promise<void> => {
+    const client = clientRef.current
+    const target = retryTarget
+    if (!client || !target || acting) return
+    setActing(true)
+    let truncated = false
+    try {
+      await client.rewindSession({ sessionId, ...(target.assistantUuid ? { assistantMessageUuid: target.assistantUuid } : {}) })
+      truncated = true
+      setServerActive(false)
+      setRunning(false)
+      await reload(client, 'replace')
+      await interactions.loadInteractions(client)
+      clearPreviousRunStatus()
+      await sendText(target.text, [])
+      setRunning(true)
+      setServerActive(true)
+      setNotice('已重试上一轮')
+    } catch (error) {
+      if (truncated) setInput(target.text)
+      setNotice(`重试失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setActing(false)
+    }
+  }, [retryTarget, acting, sessionId, reload, interactions.loadInteractions, clearPreviousRunStatus, sendText])
+
+  /**
+   * 编辑重发入口：按勾选决定「仅对话」还是「带文件还原」。
+   *
+   * 带文件还原走两段式 rewind_prepare / rewind_execute：先算计划给用户确认
+   * （哪些文件会还原/删除），再执行。prepare 失败（内核不支持 / 工作区历史不可用）
+   * 时降级成仅对话，而不是把整条路堵死。
+   */
+  const startEditRewind = React.useCallback(async (restoreFiles: boolean): Promise<void> => {
+    const target = actionTarget
+    const turnIndex = actionsTurn
+    if (!target || turnIndex === null) return
+    if (!target.userUuid) {
+      setNotice('这条消息缺少标识，无法回退')
+      return
+    }
+    const assistantUuid = resolveAssistantUuid(turnIndex)
+    setActionsTurn(null)
+    if (!restoreFiles) {
+      await rewindLegacy(target.text, assistantUuid)
+      return
+    }
+    const client = clientRef.current
+    if (!client) return
+    setActing(true)
+    try {
+      const raw = await client.sendCommand<RewindPrepareEnvelope>({
+        type: 'rewind_prepare',
+        sessionId,
+        mode: 'both',
+        target: assistantUuid
+          ? { kind: 'message', messageUuid: assistantUuid }
+          : { kind: 'session-start' },
+      })
+      const plan = raw?.plan
+      const files = Array.isArray(plan?.files) ? plan.files : []
+      const actionable = files.filter((file) => file.action === 'restore' || file.action === 'delete')
+      // 内核不支持文件还原 / 没检测到文件改动：降级成仅对话，不让用户卡死
+      if (!plan?.planId || !plan.revision || !plan.capability?.supportsFiles || actionable.length === 0) {
+        setNotice('没有可还原的文件改动，已改为仅回退对话')
+        setActing(false)
+        await rewindLegacy(target.text, assistantUuid)
+        return
+      }
+      setRewindPlan({
+        planId: plan.planId,
+        revision: {
+          session: plan.revision.session ?? 0,
+          files: plan.revision.files ?? 0,
+          state: plan.revision.state ?? 0,
+        },
+        files,
+        text: target.text,
+      })
+    } catch (error) {
+      setNotice('按文件还原不可用，已改为仅回退对话')
+      setActing(false)
+      await rewindLegacy(target.text, assistantUuid)
+      return
+    } finally {
+      setActing(false)
+    }
+  }, [actionTarget, actionsTurn, resolveAssistantUuid, rewindLegacy, sessionId])
+
+  /**
+   * 执行回退计划。非 committed（进入恢复流程）时提示去电脑端处理 —— 恢复日志是
+   * 持久化的，但网页端没有对账 UI，假装成功更糟。
+   */
+  const executeRewindPlan = React.useCallback(async (): Promise<void> => {
+    const client = clientRef.current
+    const flow = rewindPlan
+    if (!client || !flow) return
+    setActing(true)
+    try {
+      const raw = await client.sendCommand<RewindExecuteEnvelope>({
+        type: 'rewind_execute',
+        sessionId,
+        planId: flow.planId,
+        expectedRevision: flow.revision,
+      })
+      setRewindPlan(null)
+      if (raw?.status && raw.status !== 'committed') {
+        setNotice(`回退进入恢复流程（${raw.status}），请在电脑端查看恢复记录`)
+        return
+      }
+      setServerActive(false)
+      setRunning(false)
+      await reload(client, 'replace')
+      await interactions.loadInteractions(client)
+      clearPreviousRunStatus()
+      setInput(flow.text)
+      inputRef.current?.focus()
+      const restored = raw?.files?.restored?.length ?? 0
+      const deleted = raw?.files?.deleted?.length ?? 0
+      setNotice(`已回退：还原 ${restored} 个文件${deleted ? `、删除 ${deleted} 个` : ''}，改完可以直接发送`)
+    } catch (error) {
+      setNotice(`执行回退失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setActing(false)
+    }
+  }, [rewindPlan, sessionId, reload, interactions.loadInteractions])
+
+
   /**
    * 手动压缩上下文：与桌面端同一语义 —— 发送 /compact 命令。
    * 会话里会留下一条 /compact 用户气泡与压缩分隔（compacting / compact_boundary），
@@ -1515,7 +2098,11 @@ function App(): React.ReactElement {
    */
   const compactContext = async (): Promise<void> => {
     const client = clientRef.current
-    if (!client || busy || !connected || hasPending || sessionActive) return
+    if (!client || busy || !connected || hasPending || sessionActive) {
+      // 确认面板打开期间这一轮可能又跑起来了：静默返回会让「开始压缩」像没点中
+      setNotice('现在不能压缩：这一轮还在跑，或还有待处理的确认')
+      return
+    }
     if (!meta?.channelId) {
       setNotice('尚未取到会话渠道信息，请稍候或刷新页面')
       return
@@ -1533,6 +2120,7 @@ function App(): React.ReactElement {
       })
       setRunning(true)
       setCompacting(true)
+      clearPreviousRunStatus()
     } catch (error) {
       setCompacting(false)
       setNotice(`压缩失败：${error instanceof Error ? error.message : String(error)}`)
@@ -1585,47 +2173,119 @@ function App(): React.ReactElement {
 
   return (
     <div className="app">
-      <header className="topbar">
-        {/* 一个圆框一横排：标题 · 模型 · ＋ 目标 · 连接点 */}
-        <div className="title-pill" title={meta?.title || sessionId}>
-          <span className="title-text">{meta?.title || 'Profer 会话'}</span>
-          <button
-            className="model-chip"
-            onClick={() => setSettingsMenuOpen((previous) => !previous)}
-            aria-expanded={settingsMenuOpen}
-            aria-haspopup="menu"
-            disabled={!meta}
-            title="切换模型与推理强度"
-          >
-            {describeSessionModel(meta?.modelId, models, strength, currentPreset, presetRequired)}
-          </button>
-          {/* 左右固定：＋ 目标在最左、连接绿点在最右，不参与两行居中 */}
-          <div className="pill-aside">
-            {connected && !goal && (
-              <button
-                type="button"
-                className="pill-icon"
-                onClick={() => setGoalOpen((previous) => !previous)}
-                title="设定目标"
-                aria-label="设定目标"
-              >
-                +
-              </button>
-            )}
-          </div>
-          <div className="pill-aside right">
-            {staleBundle && (
-              <span className="stale-badge" title="页面代码落后于服务端，硬刷新（Ctrl+Shift+R）后生效">
-                ⚠
-              </span>
-            )}
-            <span
-              className={`conn-dot ${connected ? 'ok' : notice ? 'bad' : 'wait'}`}
-              title={connected ? '已连接' : connection}
-            />
-          </div>
-        </div>
-      </header>
+      <Topbar
+        title={meta?.title || ''}
+        sessionId={sessionId}
+        connected={connected}
+        connection={connection}
+        hasNotice={Boolean(notice)}
+        staleBundle={staleBundle}
+        metaReady={Boolean(meta)}
+        modelLabel={describeSessionModel(meta?.modelId, models, strength, currentPreset, presetRequired)}
+        settingsMenuOpen={settingsMenuOpen}
+        onToggleSettings={() => { setFocusCompact(false); setInfoOpen(false); setSettingsMenuOpen((previous) => !previous) }}
+        onOpenCompact={() => { setInfoOpen(false); setHistoryOpen(false); setFocusCompact(true); setSettingsMenuOpen(true) }}
+        contextUsage={contextUsage}
+        infoOpen={infoOpen}
+        onOpenInfo={() => { setSettingsMenuOpen(false); setHistoryOpen(false); setInfoOpen(true) }}
+        historyOpen={historyOpen}
+        onToggleHistory={() => { setInfoOpen(false); setHistoryOpen((previous) => !previous) }}
+        historyAvailable={turns.length > 0}
+      />
+      {pendingGoalStart && (
+        <ConfirmSheet
+          title="替换当前目标"
+          description={`当前会话还有一个未完成的 Goal（${goal ? goalStatusText(goal.status) : '进行中'}）。替换会把它归档到目标历史。`}
+          hint="新目标沿用当前会话上下文与工作历史；旧目标不会自动恢复。"
+          confirmLabel="替换并启动"
+          busy={acting}
+          onConfirm={() => { void replaceGoal() }}
+          onClose={() => setPendingGoalStart(null)}
+        />
+      )}
+      {rewindPlan && (
+        <RewindPlanSheet
+          files={rewindPlan.files}
+          busy={acting}
+          onExecute={() => { void executeRewindPlan() }}
+          onClose={() => setRewindPlan(null)}
+        />
+      )}
+      {compactConfirmOpen && (
+        <ConfirmSheet
+          title="压缩上下文"
+          description="把当前会话的历史压成摘要，释放上下文窗口。"
+          hint="压缩会占用一轮，期间不能发送消息；细节以摘要形式保留，完整记录仍在会话文件里。"
+          confirmLabel="开始压缩"
+          busy={busy}
+          onConfirm={() => { setCompactConfirmOpen(false); void compactContext() }}
+          onClose={() => setCompactConfirmOpen(false)}
+        />
+      )}
+      {stopSendText !== null && (
+        <StopAndSend
+          busy={acting}
+          onStop={() => { void stopAndSend() }}
+          onClose={() => setStopSendText(null)}
+        />
+      )}
+      {actionsTurn !== null && actionTarget && (
+        <TurnActions
+          text={actionTarget.text}
+          canEdit={!sessionActive && Boolean(actionTarget.userUuid)}
+          editHint={sessionActive ? '本轮还在运行，结束后再编辑' : '这条消息缺少标识（旧数据），无法回退'}
+          busy={acting}
+          restoreFiles={restoreFiles}
+          onRestoreFilesChange={setRestoreFiles}
+          onCopy={() => { void copyActionText() }}
+          onEdit={() => { void startEditRewind(restoreFiles) }}
+          onClose={() => setActionsTurn(null)}
+        />
+      )}
+      {infoOpen && (
+        <SessionInfo
+          items={[
+            // 模型 / 权限 / 档位在标题下面那一行已经显示了，这里只留「对不上号时用得上」的两项
+            { key: '会话', value: sessionId || '未指定' },
+            { key: '构建', value: WEBUI_BUILD },
+            {
+              key: '技能 /',
+              value: skillStatus === 'ok'
+                ? `${skillOptions.length} 个可用`
+                : skillStatus === 'empty'
+                  ? (skillWarning ? `扫描失败：${skillWarning}` : '工作区没有启用的技能')
+                  : skillStatus === 'unsupported'
+                    ? '主进程未更新，需重启 Profer'
+                    : skillStatus === 'error'
+                      ? `读取失败：${skillWarning ?? '请刷新重试'}`
+                      : '加载中…',
+            },
+            {
+              key: '文件 @',
+              value: fileOptions.length > 0 ? `${fileOptions.length} 个可引用` : '无可引用文件',
+            },
+            {
+              key: '窗口',
+              value: contextWindow ? formatTokens(contextWindow) + ' tokens' : '未知名（跑一轮后可知名）',
+            },
+          ]}
+          onClose={() => setInfoOpen(false)}
+        />
+      )}
+      {historyOpen && (
+        <MessageHistory
+          entries={historyEntries}
+          hasOlder={hasOlder}
+          loadingOlder={loadingOlder}
+          onLoadOlder={() => void loadOlder()}
+          onJump={jumpToTurn}
+          onRemoteSearch={remoteSearch}
+          onJumpMatch={(match) => { void jumpToSearchMatch(match) }}
+          jumpDisabled={sessionActive}
+          jumping={searchJumping}
+          onClose={() => setHistoryOpen(false)}
+        />
+      )}
       {settingsMenuOpen && (
         <SessionSettingsMenu
           models={models}
@@ -1637,16 +2297,19 @@ function App(): React.ReactElement {
           busy={switchingModel}
           permissionMode={permissionMode ?? 'bypassPermissions'}
           permissionModes={PERMISSION_MODES}
+          hasGoal={Boolean(goal)}
+          onOpenGoal={() => { setSettingsMenuOpen(false); if (goal) setGoalEditorOpen(true); else setGoalOpen(true) }}
           compacting={compacting}
           compactDisabled={!connected || busy || hasPending || sessionActive || !meta?.channelId}
-          sessionInfo={`会话 ${sessionId ? sessionId.slice(0, 8) : '未指定'} · 构建 ${__WEBUI_BUILD__}`}
-          onCompact={() => { setSettingsMenuOpen(false); void compactContext() }}
+          contextUsage={contextUsage}
+          focusCompact={focusCompact}
+          onCompact={() => { setSettingsMenuOpen(false); setCompactConfirmOpen(true) }}
           onPickModel={(option) => void pickModel(option)}
           onPickStrength={(value) => void pickStrength(value)}
           onPickPreset={(id) => void applyPreset(id)}
           onPickPermissionMode={(mode) => void switchPermissionMode(mode as SendPermissionMode)}
           onManagePresets={() => { setSettingsMenuOpen(false); setPresetPanelOpen(true) }}
-          onClose={() => setSettingsMenuOpen(false)}
+          onClose={() => { setFocusCompact(false); setSettingsMenuOpen(false) }}
         />
       )}
       {goal
@@ -1655,7 +2318,7 @@ function App(): React.ReactElement {
             goal={goal}
             archives={goalHistory.filter((item) => item.id !== goal.id)}
             busy={acting}
-            waits={{ askUser: askUsers.length, permission: permissions.length }}
+            waits={{ askUser: interactions.askUsers.length, permission: interactions.permissions.length }}
             onAction={(action) => void runGoalAction(action)}
             onEdit={() => setGoalEditorOpen(true)}
           />
@@ -1698,9 +2361,9 @@ function App(): React.ReactElement {
           className="stream"
           ref={scrollRef}
           onScroll={handleStreamScroll}
-          onWheel={() => { userEngagedRef.current = true }}
-          onTouchStart={() => { userEngagedRef.current = true }}
-          onKeyDown={() => { userEngagedRef.current = true }}
+          onWheel={handleUserEngage}
+          onTouchStart={handleUserEngage}
+          onKeyDown={handleUserEngage}
         >
           {hasOlder && (
             <div className="load-older">
@@ -1709,7 +2372,8 @@ function App(): React.ReactElement {
               </button>
             </div>
           )}
-          {turns.length === 0 ? (
+          {/* 首屏消息未就位前不渲染空态，否则刷新会闪一下「开始对话」；缺凭据要立刻说明情况 */}
+          {turns.length === 0 && (historyLoaded || !token) ? (
             <div className="empty">
               <div className="empty-title">{!token ? '需要访问凭据' : connected ? '开始对话' : '正在连接'}</div>
               <div className="empty-desc">
@@ -1739,12 +2403,30 @@ function App(): React.ReactElement {
               )}
             </div>
           ) : turns.map((turn) => {
+            /**
+             * 系统消息是**分隔条**（上下文压缩边界 / 任务来源 / 权限拒绝 / 中断记录），
+             * 不是谁说的话。以前落进了助手气泡分支，读起来就成了「模型说：上下文已压缩」——
+             * 正好它下一句正文又以「上下文已压缩。」开头时，看起来就像同一条渲染了两遍。
+             */
+            if (turn.role === 'system') {
+              const label = turn.text.trim()
+              if (!label) return null
+              return (
+                <div className="turn-divider" key={turn.index} data-turn-index={turn.index}>
+                  {label}
+                </div>
+              )
+            }
             const extra = extras[turn.index]
             const timeline = timelines[turn.index]
             const isAssistant = turn.role === 'assistant'
             // 过程条目挂在组里，正文只留「最终答复」——两段分开取，避免正文被折叠进执行过程
-            const body = stripContextBlocks(isAssistant ? (timeline?.headline ?? '') : turn.text)
+            // \(...\) / \[...\] 先规范化成 remark-math 认得的 $ / $$，再交给 markdown 渲染
+            const body = normalizeLatexDelimiters(
+              stripContextBlocks(isAssistant ? (timeline?.headline ?? '') : turn.text),
+            )
             // 图表按 toolCallId 挂回回合：tool_use 的 id 在 WS 投影里是保留的，这是唯一可靠的连接键。
+            // 只有工具行已加载的回合才拿得到图表；更早的历史图表等对应回合续页加载后自然出现。
             const turnViz = (timeline?.items ?? [])
               .flatMap((item) => (item.kind === 'tool' ? [vizByTool.get(item.tool.id)] : []))
               .filter((item): item is VisualizationItem => Boolean(item))
@@ -1754,47 +2436,102 @@ function App(): React.ReactElement {
             const turnMeta = turnMetas[turn.index]
             const hasMeta = Boolean(turnMeta
               && (turnMeta.model || turnMeta.clock || turnMeta.sourceLabel || turnMeta.usageText))
-            // 属于这一回合之前的孤儿图表（工具行还没加载进来），按时间就地补上，
-            // 不集中丢到消息流末尾
-            const leadingViz = vizSlots.get(turn.index) ?? []
+            const metaRow = hasMeta && turnMeta ? (
+              <div className="turn-meta">
+                {turnMeta.model && <span className="tm-model">{turnMeta.model}</span>}
+                {turnMeta.sourceLabel && <span className="tm-src">{turnMeta.sourceLabel}</span>}
+                {turnMeta.clock && <span className="tm-clock">{turnMeta.clock}</span>}
+                {turnMeta.usageText && (
+                  <span className="tm-usage" title={turnMeta.usageDetail}>{turnMeta.usageText}</span>
+                )}
+              </div>
+            ) : null
+            /**
+             * 正文里裸文件名的定位依据：本轮所有工具调用触及的路径。
+             * 同名冲突在 `buildTurnFileIndex` 内剔除；没有索引时裸文件名保持普通代码。
+             */
+            const fileIndex = isAssistant
+              ? buildTurnFileIndex(
+                timeline?.items.flatMap((item) => (
+                  item.kind === 'tool' && item.tool.filePath ? [item.tool.filePath] : []
+                )) ?? [],
+              )
+              : undefined
             return (
-              <React.Fragment key={turn.index}>
-                {leadingViz.length > 0 && (
-                  <div className="turn assistant viz-orphan">
-                    <div className="viz-orphan-label">较早的图表</div>
-                    <VisualizationList items={leadingViz} />
+              <div
+                key={turn.index}
+                className={`turn ${turn.role === 'user' ? 'user' : 'assistant'}`}
+                data-turn-index={turn.index}
+              >
+                {isAssistant && timeline && (
+                  <TurnProcess
+                    timeline={timeline}
+                    live={live}
+                    onOpenFile={openFile}
+                    {...(fileIndex ? { fileIndex } : {})}
+                    visualizations={turnViz}
+                  />
+                )}
+                {/* 任务卡放在过程组外：过程收起后仍能看到「还剩几步 / 现在做到哪」 */}
+                {isAssistant && timeline && timeline.tasks.length > 0 && (
+                  <TaskProgressCard tasks={timeline.tasks} />
+                )}
+                {(body || (turn.role === 'user' && (extra?.attachedFiles.length ?? 0) > 0)) && (
+                  <div className="body">
+                    {turn.role === 'user' && <TurnAttachments files={extra?.attachedFiles ?? []} />}
+                    {body && (
+                      <MarkdownWithFiles
+                        text={body}
+                        onOpenFile={openFile}
+                        {...(fileIndex ? { fileIndex } : {})}
+                      />
+                    )}
                   </div>
                 )}
-                <div className={`turn ${turn.role === 'user' ? 'user' : 'assistant'}`}>
-                  {isAssistant && timeline && <TurnProcess timeline={timeline} live={live} />}
-                  {(body || (turn.role === 'user' && (extra?.attachedFiles.length ?? 0) > 0)) && (
-                    <div className="body">
-                      {turn.role === 'user' && <TurnAttachments files={extra?.attachedFiles ?? []} />}
-                      {body && <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>}
-                    </div>
-                  )}
-                  <TurnImages imagePaths={extra?.imagePaths ?? []} loadImage={loadImage} />
-                  <VisualizationList items={turnViz} />
-                  {/* 来源与时间：只对「谁发的」有意义，助手回合省掉来源标签 */}
-                  {hasMeta && turnMeta && (
-                    <div className="turn-meta">
-                      {turnMeta.model && <span className="tm-model">{turnMeta.model}</span>}
-                      {turnMeta.sourceLabel && <span className="tm-src">{turnMeta.sourceLabel}</span>}
-                      {turnMeta.clock && <span className="tm-clock">{turnMeta.clock}</span>}
-                      {turnMeta.usageText && (
-                        <span className="tm-usage" title={turnMeta.usageDetail}>{turnMeta.usageText}</span>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </React.Fragment>
+                <TurnImages imagePaths={extra?.imagePaths ?? []} loadImage={loadImage} />
+                {/* 用户消息的元信息与操作入口收在同一行：⋯ 单独占一行会给每条消息拖一截尾巴 */}
+                {turn.role === 'user' ? (
+                  <div className="turn-footer">
+                    {metaRow}
+                    <button
+                      className="turn-actions-btn"
+                      onClick={() => setActionsTurn(turn.index)}
+                      aria-label="消息操作"
+                      title="消息操作"
+                    >
+                      ⋯
+                    </button>
+                  </div>
+                ) : metaRow}
+              </div>
             )
           })}
-          {/* 只有确实比所有回合都新的图表才放在末尾 */}
-          {(vizSlots.get(turns.length) ?? []).length > 0 && (
-            <div className="turn assistant viz-orphan">
-              {/* 这类图表比所有已加载回合都新（本轮刚生成、工具行还没到），不标「较早」 */}
-              <VisualizationList items={vizSlots.get(turns.length) ?? []} />
+          {/* 结局行只在收尾后出现：运行中已经在跑，不需要再解释上一轮怎么结束的；
+              首屏消息未就位前也不显示，事件回放会先把上一轮结局顶出来 */}
+          {effectiveOutcome && historyLoaded && !sessionActive && (
+            <div
+              className={`run-outcome ${runOutcomeTone(effectiveOutcome.kind)}`}
+              data-outcome-source={effectiveOutcome.source}
+            >
+              <span className="run-outcome-label">{effectiveOutcome.label}</span>
+              {effectiveOutcome.detail && (
+                <span className="run-outcome-detail">
+                  {effectiveOutcome.detail}
+                  {effectiveOutcome.detailCount !== undefined && effectiveOutcome.detailCount > 1
+                    ? ` 等 ${effectiveOutcome.detailCount} 项`
+                    : ''}
+                </span>
+              )}
+              {retryTarget && (
+                <button
+                  type="button"
+                  className="run-outcome-retry"
+                  disabled={acting}
+                  onClick={() => { void retryLastTurn() }}
+                >
+                  {acting ? '重试中…' : '重试'}
+                </button>
+              )}
             </div>
           )}
           {sessionActive && (
@@ -1815,97 +2552,46 @@ function App(): React.ReactElement {
       {hasCards && (
         <div className="interactions">
           <InteractionCards
-            permissions={permissions}
-            askUsers={askUsers}
-            exitPlans={exitPlans}
-            goalProposals={goalProposals}
+            permissions={interactions.permissions}
+            askUsers={interactions.askUsers}
+            exitPlans={interactions.exitPlans}
+            goalProposals={interactions.goalProposals}
             busy={acting}
-            {...interactionHandlers}
+            {...interactions.handlers}
           />
         </div>
       )}
-      <div className="composer">
-        {/* 附件条在输入框之上：它是「这一条消息的组成」，不是输入框的一部分 */}
-        {attachments.length > 0 && (
-          <div className="attach-bar">
-            {attachments.map((item) => (
-              <div className={`attach-chip ${item.status}`} key={item.key} title={item.error ?? item.filename}>
-                <span className="attach-name">{item.filename}</span>
-                <span className="attach-size">
-                  {item.status === 'uploading' ? '上传中…' : item.status === 'error' ? item.error : formatBytes(item.size)}
-                </span>
-                <button
-                  className="attach-remove"
-                  onClick={() => setAttachments((previous) => previous.filter((entry) => entry.key !== item.key))}
-                  aria-label={`移除附件 ${item.filename}`}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-        <input
-          ref={fileInputRef}
-          className="attach-input"
-          type="file"
-          multiple
-          onChange={(event) => {
-            pickFiles(event.target.files)
-            // 清空 value：同一个文件连选两次也要能触发 change
-            event.target.value = ''
-          }}
-        />
-        <div className={`composer-pill ${hasPending ? 'blocked' : ''}`}>
-          <button
-            className="attach-btn"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={hasPending || !connected}
-            title="添加附件"
-            aria-label="添加附件"
-          >
-            +
-          </button>
-          <textarea
-            ref={inputRef}
-            rows={1}
-            value={input}
-            disabled={hasPending}
-            placeholder={hasPending ? '先处理上方的确认卡片' : '发送消息…'}
-            title={PREFER_SEND_BUTTON ? undefined : 'Enter 发送，Shift+Enter 换行'}
-            enterKeyHint={PREFER_SEND_BUTTON ? 'enter' : 'send'}
-            onChange={(event) => setInput(event.target.value)}
-            onPaste={(event) => {
-              // 截图/文件直接粘贴：桌面端最顺手的上传方式，不接反而显得「网页版少一块」
-              const files = event.clipboardData?.files
-              if (!files || files.length === 0) return
-              event.preventDefault()
-              pickFiles(files)
-            }}
-            onKeyDown={(event) => {
-              // 触屏上 Enter 留给换行，发送一律走右侧圆键（换行后再按 Enter 也不会误发）。
-              if (PREFER_SEND_BUTTON) return
-              if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
-              // 中文输入法用 Enter 上屏，此时不能当成发送；isComposing 就是这道闸。
-              event.preventDefault()
-              void send()
-            }}
-          />
-          {/* 一个位置一个主动作：能发就是发送，运行中且没内容才是停止 */}
-          {sessionActive && !input.trim() && readyAttachments.length === 0 ? (
-            <button className="send-btn run" onClick={() => void stop()} title="停止本轮运行">■</button>
-          ) : (
-            <button
-              className={`send-btn ${canSend ? 'ready' : ''}`}
-              disabled={!canSend}
-              onClick={() => void send()}
-              title={uploadingAttachments ? '附件上传中' : '发送（Enter）'}
-            >
-              {busy ? '…' : '↑'}
-            </button>
-          )}
-        </div>
-      </div>
+      <RunStatus
+        retry={retryInfo}
+        persistenceWarning={persistenceWarning}
+        background={backgroundTasks}
+        delegations={delegations}
+      />
+      <Composer
+        input={input}
+        onInputChange={setInput}
+        onSend={() => { void send() }}
+        onStop={() => { void stop() }}
+        busy={busy}
+        canSend={canSend}
+        sessionActive={sessionActive}
+        willQueue={sessionActive || serverActive}
+        hasPending={hasPending}
+        connected={connected}
+        attachments={attachments}
+        readyCount={readyAttachments.length}
+        uploading={uploadingAttachments}
+        onPickFiles={pickFiles}
+        onRemoveAttachment={removeAttachment}
+        fileInputRef={fileInputRef}
+        inputRef={inputRef}
+        skills={skillOptions}
+        files={fileOptions}
+        onFileQuery={(query) => {
+          const client = clientRef.current
+          if (client) void loadFiles(client, query)
+        }}
+      />
       <DiagOverlay data={diagData} />
     </div>
   )

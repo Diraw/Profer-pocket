@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import type { MessageGroup } from '@profer/session-core'
 import { buildAssistantTimeline } from './turn-timeline'
 import { TurnProcess } from './turn-process'
+import { normalizeVisualizations } from './visualization'
 
 function turnOf(contents: unknown[][], results: string[] = []): MessageGroup {
   const assistant = contents.map((content, index) => ({
@@ -49,5 +50,50 @@ describe('执行过程组渲染', () => {
   test('Given 没有过程条目 When 渲染 Then 返回 null，不留一行空标题', () => {
     const empty = buildAssistantTimeline(turnOf([[text('直接回答')]]))
     expect(renderToStaticMarkup(<TurnProcess timeline={empty} live />)).toBe('')
+  })
+})
+
+describe('过程组里的图表', () => {
+  /** 桌面端 present_visualization 落盘的一条记录，靠 toolCallId 挂回工具行 */
+  const chart = (toolCallId: string, title = '各渠道停留时长') => normalizeVisualizations([{
+    id: `viz-${toolCallId}`,
+    toolCallId,
+    title,
+    format: 'chart',
+    createdAt: 1,
+    chart: {
+      chartType: 'bar',
+      xKey: 'channel',
+      series: [{ dataKey: 'minutes' }],
+      data: [{ channel: '搜索', minutes: 42 }],
+    },
+  }])[0]!
+
+  const timeline = buildAssistantTimeline(turnOf([
+    [tool('t1', 'mcp__collaboration__delegate_agent', '先取数据'), tool('t2', 'Read', '读取报告')],
+  ], ['t1', 't2']))
+
+  test('Given 图表属于本回合 When 过程组展开 Then 卡片紧跟在触发生成它的工具行之后', () => {
+    const html = renderToStaticMarkup(
+      <TurnProcess timeline={timeline} live visualizations={[chart('t1')]} />,
+    )
+    const chartAt = html.indexOf('各渠道停留时长')
+    expect(chartAt).toBeGreaterThan(html.indexOf('delegate_agent'))
+    // 挂在 t1 下面，而不是飘到整轮末尾（下一行工具 t2 之前就该出现）
+    expect(chartAt).toBeLessThan(html.indexOf('读取报告'))
+  })
+
+  test('Given 过程组收起 When 渲染 Then 图表随组一起不进 DOM（不再单独悬在对话流里）', () => {
+    const html = renderToStaticMarkup(
+      <TurnProcess timeline={timeline} live={false} visualizations={[chart('t1')]} />,
+    )
+    expect(html).not.toContain('各渠道停留时长')
+  })
+
+  test('Given 图表属于其他回合 When 渲染 Then 不挂到本轮（toolCallId 对不上就不显示）', () => {
+    const html = renderToStaticMarkup(
+      <TurnProcess timeline={timeline} live visualizations={[chart('t-other')]} />,
+    )
+    expect(html).not.toContain('各渠道停留时长')
   })
 })

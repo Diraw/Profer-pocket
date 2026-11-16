@@ -288,3 +288,93 @@ describe('过程组收起判据（WebUI 看不到 result）', () => {
   })
 })
 
+
+describe('任务进度：任务工具抽成卡片', () => {
+  const taskCreate = (id: string, input: Record<string, unknown>): unknown => ({
+    type: 'tool_use', id, name: 'TaskCreate', input,
+  })
+  const turnWithResults = (
+    contents: unknown[][],
+    results: Array<{ id: string; output?: string }>,
+  ): MessageGroup => {
+    const assistant = contents.map((content, index) => ({
+      type: 'assistant' as const,
+      uuid: `a${index}`,
+      message: { role: 'assistant', content },
+    }))
+    const toolResults = results.map((result) => ({
+      type: 'user' as const,
+      uuid: `r-${result.id}`,
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: result.id,
+          ...(result.output ? { output: result.output } : {}),
+        }],
+      },
+    }))
+    return {
+      type: 'assistant-turn',
+      assistantMessages: assistant,
+      turnMessages: [...assistant, ...toolResults],
+    } as never as MessageGroup
+  }
+
+  test('Given TaskCreate + TaskUpdate When 派生 Then 工具行被抽走，任务进入 tasks', () => {
+    const timeline = buildAssistantTimeline(turnWithResults([
+      [
+        taskCreate('t1', { subject: '补任务卡', activeForm: '正在补任务卡' }, '{"task":{"id":"1","subject":"补任务卡"}}'),
+        { type: 'tool_use', id: 't2', name: 'TaskUpdate', input: { taskId: '1', status: 'in_progress' } },
+        { type: 'tool_use', id: 't3', name: 'Read', input: { file_path: '/a.ts' } },
+      ],
+    ], [{ id: 't1', output: '{"task":{"id":"1","subject":"补任务卡"}}' }, { id: 't2' }, { id: 't3' }]))
+    expect(timeline.items.map((item) => item.kind === 'tool' ? item.tool.name : item.kind)).toEqual(['Read'])
+    expect(timeline.tasks).toEqual([
+      { id: '1', subject: '补任务卡', status: 'in_progress', activeForm: '正在补任务卡' },
+    ])
+    expect(timeline.summary).toBe('执行过程：1 次工具调用')
+  })
+
+  test('Given 任务工具是唯一内容 When 派生 Then 过程组为空，任务卡仍然有数据', () => {
+    const timeline = buildAssistantTimeline(turnWithResults([
+      [taskCreate('t1', { subject: '唯一任务' })],
+    ], [{ id: 't1', output: '{"task":{"id":"1"}}' }]))
+    expect(timeline.items).toEqual([])
+    expect(timeline.tasks.map((task) => task.subject)).toEqual(['唯一任务'])
+  })
+
+  test('Given 投影只有 inputText When 派生 Then 仍能解析任务名', () => {
+    const timeline = buildAssistantTimeline(turnWithResults([
+      [{ type: 'tool_use', id: 't1', name: 'TaskCreate', input: {}, inputText: '{"subject":"投影任务"}' }],
+    ], [{ id: 't1', output: '{"task":{"id":"2"}}' }]))
+    expect(timeline.tasks[0]?.subject).toBe('投影任务')
+    expect(timeline.tasks[0]?.id).toBe('2')
+  })
+
+  test('Given 传入历史映射 When 派生 Then 后续轮的 TaskUpdate 能还原任务名', () => {
+    const timeline = buildAssistantTimeline(
+      turnWithResults([[{ type: 'tool_use', id: 't1', name: 'TaskUpdate', input: { taskId: '8', status: 'completed' } }]], [{ id: 't1' }]),
+      true,
+      { historicalTaskSubjects: new Map([['8', '上一轮创建的任务']]) },
+    )
+    expect(timeline.tasks).toEqual([{ id: '8', subject: '上一轮创建的任务', status: 'completed' }])
+  })
+
+  test('Given 收尾但任务没标完成 When streamEnded Then 不转圈（退回 pending）', () => {
+    const timeline = buildAssistantTimeline(
+      turnWithResults([[{ type: 'tool_use', id: 't1', name: 'TaskUpdate', input: { taskId: '1', status: 'in_progress' } }]], [{ id: 't1' }]),
+      true,
+      { historicalTaskSubjects: new Map([['1', '还在做的任务']]), streamEnded: true },
+    )
+    expect(timeline.tasks[0]?.status).toBe('pending')
+  })
+
+  test('Given 仍在运行 When streamEnded=false Then 保持 in_progress', () => {
+    const timeline = buildAssistantTimeline(
+      turnWithResults([[{ type: 'tool_use', id: 't1', name: 'TaskUpdate', input: { taskId: '1', status: 'in_progress' } }]], [{ id: 't1' }]),
+      false,
+      { historicalTaskSubjects: new Map([['1', '还在做的任务']]), streamEnded: false },
+    )
+    expect(timeline.tasks[0]?.status).toBe('in_progress')
+  })
+})
